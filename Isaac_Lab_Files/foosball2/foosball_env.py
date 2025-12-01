@@ -75,7 +75,8 @@ class FoosballEnvCfg(DirectRLEnvCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.05, 0.0, 0.79025), rot=(1.0, 0.0, 0.0, 0.0)),
     )
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.0, replicate_physics=True)
+    # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=4096, env_spacing=2.0, replicate_physics=True)
 
 
 class FoosballEnv(DirectRLEnv):
