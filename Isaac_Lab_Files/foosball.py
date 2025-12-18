@@ -16,8 +16,7 @@ from isaaclab.assets import ArticulationCfg
 
 FOOSBALL_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        # usd_path=r"/home/yw3809/Projects/foosball/Foosball_CU/Isaac_Lab_Files/foosball_no_ball.usd",  #current USD Location
-        usd_path=r"./../../../../../Foosball_CU/Isaac_Lab_Files/foosball_no_ball.usd",  #current USD Location
+        usd_path=r"/home/yw3809/Projects/foosball/Foosball_CU/Isaac_Lab_Files/foosball_no_ball.usd",
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             rigid_body_enabled=True,
             #max_linear_velocity=1000.0,
