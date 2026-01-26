@@ -13,7 +13,7 @@ DIRECTION_CHANGE = 1
 TABLE_MAX_Y_DIM = 65
 BALL_STOPPED_COUNT_THRESHOLD = 10
 MAX_STEPS = 40
-SIM_PATH = os.environ.get('SIM_PATH', '/Research/Foosball_CU/foosball_sim/v2/foosball_sim.xml')
+SIM_PATH = os.environ.get('SIM_PATH', './foosball_sim/v2/foosball_sim.xml')
 
 RODS = ["_goal_", "_def_", "_mid_", "_attack_"]
 
