@@ -10,16 +10,35 @@ from ai_agents.common.train.impl.single_player_training_engine_rule_based import
 from ai_agents.v2.gym.full_information_protagonist_antagonist_gym_rule_based import FoosballEnv
 
 
-def sac_foosball_env_factory(x=None):
-    env = FoosballEnv(antagonist_model=None)
-    env = Monitor(env)
-    return env
+def make_env_factory(protagonist_strategy="basic", antagonist_strategy="basic"):
+    """Return a closure that creates FoosballEnv with the given strategies.
+
+    The returned factory accepts an optional positional arg (for compatibility
+    with GenericAgentManager and SinglePlayerTrainingEngine).
+    """
+    def factory(x=None):
+        env = FoosballEnv(
+            antagonist_model=None,
+            protagonist_strategy_name=protagonist_strategy,
+            antagonist_strategy_name=antagonist_strategy,
+        )
+        env = Monitor(env)
+        return env
+    return factory
+
 
 if __name__ == '__main__':
-    argparse = argparse.ArgumentParser(description='Train or test model.')
-    argparse.add_argument('-t', '--test', help='Test mode', action='store_true')
-    args = argparse.parse_args()
+    parser = argparse.ArgumentParser(description='Train or test model.')
+    parser.add_argument('-t', '--test', help='Test mode', action='store_true')
+    parser.add_argument('--protagonist-strategy', default='basic',
+                        choices=['basic', 'advanced'],
+                        help='Strategy for protagonist (yellow)')
+    parser.add_argument('--antagonist-strategy', default='basic',
+                        choices=['basic', 'advanced'],
+                        help='Strategy for antagonist (black)')
+    args = parser.parse_args()
 
+    env_factory = make_env_factory(args.protagonist_strategy, args.antagonist_strategy)
 
     model_dir = './models'
     log_dir = './logs'
@@ -28,13 +47,13 @@ if __name__ == '__main__':
     # epoch_timesteps = int(100000)
     epoch_timesteps = int(100)
 
-    agent_manager = GenericAgentManager(1, sac_foosball_env_factory, SACFoosballAgent)
+    agent_manager = GenericAgentManager(1, env_factory, SACFoosballAgent)
     agent_manager.initialize_training_agents()
     agent_manager.initialize_frozen_best_models()
 
     engine = SinglePlayerTrainingEngine(
         agent_manager=agent_manager,
-        environment_generator=sac_foosball_env_factory
+        environment_generator=env_factory
     )
 
     # Start training
