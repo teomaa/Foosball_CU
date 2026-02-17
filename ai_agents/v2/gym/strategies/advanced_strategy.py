@@ -5,7 +5,7 @@ Key improvements over BasicStrategy:
   - Role-specific behavior for each rod (goalkeeper, defense, midfield, attack)
   - Ball trajectory prediction with wall-bounce reflection
   - Opponent gap analysis for aimed shots
-  - Trap-then-act (pin ball, hold, then kick/pass)
+  - Deliberate pass targeting toward next rod's foosman
 """
 
 import numpy as np
@@ -13,6 +13,9 @@ import numpy as np
 from ai_agents.v2.gym.strategies.base_strategy import FoosballStrategy
 
 ROD_KEYS = ["goal", "def", "mid", "attack"]
+
+# Forward rod mapping for pass targeting
+_NEXT_ROD = {"goal": "def", "def": "mid", "mid": "attack"}
 
 # Game phases
 DEFENDING = 0
@@ -32,44 +35,41 @@ class AdvancedStrategy(FoosballStrategy):
         # Phase 1 (cock-back → center): angle = ball_speed * gain (variable).
         # Phase 2 (center → forward): angle = kick_strike_speed (static).
         # Total forward target on contact = cock_back + kick_strike_speed.
-        self.kick_back_speed_gain = 0.05
+        self.kick_back_speed_gain = 0.02
         # Default cock-back angle when ball is slow/stationary (rad).
-        self.kick_back_default = 1.6
+        # Smaller = slower cocking, and larger forward swing (faster kick).
+        self.kick_back_default = 0.5
         # Ball speed threshold below which kick_back_default is used.
         self.kick_back_min_speed = 0.5
-        # Static forward rotation past center (phase 2, rad).
-        # Higher = harder kick from center onward.
-        self.kick_strike_speed = 4.3
+        # Static forward kick speed (rad). Fixed high value, independent of cock-back.
+        # Ensures maximum forward rotation on every kick.
+        self.kick_strike_speed = 10.0
         # X-distance (table units) to start cocking. Higher = starts cocking from further away, more anticipation but more false triggers.
-        self.kick_x_close = 2.5
+        self.kick_x_close = 1.5
         # X-distance for contact kick. Lower = requires tighter alignment to fire, more accurate but easier to miss.
         self.kick_x_contact = 0.6
         # Min Y-distance (ball ahead of foosman) to begin cocking. More negative = starts cocking when ball is slightly behind.
         self.kick_y_front_min = -1.2
-        # Max Y-distance to begin cocking. Higher = cocks even when ball is far ahead, wider ready window.
+        # Max Y-distance for rod to be "aware" of ball (ready zone). Must be large enough
+        # to cover the ball's starting position relative to the nearest rod (~7.5 units).
         self.kick_y_front_max = 9.0
+        # Max Y-distance to actually engage the cock-back rotation. Ball must be this close
+        # before the rod winds up. Further away = hold neutral (0) instead of cocking.
+        self.cock_engage_dy_max = 3.0
         # Max Y-distance for contact kick. Higher = fires at ball that's further in front, more forgiving but less precise.
         self.kick_y_contact_max = 1.25
         # Random slide offset on kick (table units). Higher = wider angle shot variety, less predictable but less accurate.
         self.kick_offset_max = 5.0
         # Lane-clearing rotation (rad). More negative = lifts foosmen higher out of ball's path, but slower to recover.
-        self.clear_lane_angle = -2.0
+        self.clear_lane_angle = -1.5
         # Ball vy threshold for "fast approach" (table units/sec). Lower = more balls treated as fast (hold block instead of cocking).
         self.front_fast_vy_thresh = 9.0
-        # Min Y-distance behind rod to trigger back-approach lift/kick.
-        self.back_approach_dy_min = 0.5
+        # Max Y-distance behind rod to trigger back-approach kick.
+        # Only react when ball is very close behind (small value = tighter window).
+        self.back_kick_dy_max = 2.0
 
-        # --- Trap params ---
-        # Steps to hold pin before releasing kick/pass. Higher = longer possession, more time to aim but slower play.
-        self.trap_hold_steps = 3
-        # Downward pin rotation (rad). More negative = presses ball harder against table, firmer trap but harder to release cleanly.
-        self.trap_pin_angle = -0.4
-        # Max X-distance to consider ball "possessed". Higher = attempts traps from further away, more aggressive but more failed traps.
-        self.trap_dx_thresh = 1.0
-        # Max Y-distance to consider ball "possessed". Higher = larger possession zone in front of foosman.
-        self.trap_dy_thresh = 1.5
-        # Max ball speed to attempt a trap. Higher = tries to trap faster balls, riskier but gains possession more often.
-        self.trap_vel_thresh = 3.0
+        # Max X-distance to consider ball near enough for a stationary kick.
+        self.stationary_kick_dx = 1.0
 
         # --- Phase detection thresholds ---
         # Fraction of half-field for defending zone. Higher = wider defensive zone, spends more time in DEFENDING phase.
@@ -85,11 +85,7 @@ class AdvancedStrategy(FoosballStrategy):
         # Slide bias toward center when ball is far (0-1). Higher = goalie stays more centered, better coverage but less reactive to wide shots.
         self.goalie_center_bias = 0.6
         # Clearing kick angle (rad). Higher = more powerful clearance, ball travels further but less control.
-        self.goalie_clear_angle = 3.90
-
-        # --- Pass params ---
-        # Kick angle for passing (rad). Lower = softer pass with more control, higher = harder pass that travels further.
-        self.pass_kick_angle = 2.5
+        self.goalie_clear_angle = 5.0
 
         # --- Table geometry (hardcoded, can refine via MuJoCo query) ---
         self.table_x_min = -15.0
@@ -100,8 +96,6 @@ class AdvancedStrategy(FoosballStrategy):
         self.rod_cocked_state = {k: False for k in ROD_KEYS}
         self.rod_cocked_y = {k: 0.0 for k in ROD_KEYS}
         self.lane_clear_state = {k: False for k in ROD_KEYS}
-        self.trap_state = {k: False for k in ROD_KEYS}
-        self.trap_counter = {k: 0 for k in ROD_KEYS}
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -112,8 +106,6 @@ class AdvancedStrategy(FoosballStrategy):
             self.rod_cocked_state[k] = False
             self.rod_cocked_y[k] = 0.0
             self.lane_clear_state[k] = False
-            self.trap_state[k] = False
-            self.trap_counter[k] = 0
 
     def compute_action(self, obs: np.ndarray) -> np.ndarray:
         ball_x, ball_y = float(obs[0]), float(obs[1])
@@ -262,13 +254,19 @@ class AdvancedStrategy(FoosballStrategy):
             rot_target = self.kick_sign * self.goalie_blocking_angle
             return slide_target, rot_target, False
 
-        # Back-approach: ball behind goalkeeper and moving further behind — lift out of the way
+        # Back-approach: ball behind goalkeeper and moving forward
         dy_back = -dy_front
-        if dy_back > self.back_approach_dy_min and self._is_approaching_from_back(ball_vy):
+        if dy_back > 0 and self._is_approaching_from_back(ball_vy):
             self.rod_cocked_state[rod_key] = False
             self.rod_cocked_y[rod_key] = 0.0
-            rot_target = self.clear_lane_angle
-            return slide_target, rot_target, False
+            # Only kick when ball is very close behind
+            ball_speed_ba = np.sqrt(ball_vx**2 + ball_vy**2)
+            if dy_back <= self.back_kick_dy_max and dx <= self.kick_x_close:
+                kick_angle = self.kick_strike_speed + ball_speed_ba * 0.1
+                rot_target = self.kick_sign * kick_angle
+                return slide_target, rot_target, True
+            # Not close: stay neutral
+            return slide_target, 0.0, False
 
         # Ball very close and slow => clearing kick
         in_contact = (0.0 <= dy_front <= self.kick_y_contact_max) and (dx <= self.kick_x_contact)
@@ -278,6 +276,14 @@ class AdvancedStrategy(FoosballStrategy):
 
         # Close enough to cock
         in_front_ready = (self.kick_y_front_min <= dy_front <= self.kick_y_front_max) and (dx <= self.kick_x_close)
+
+        # Stationary ball near goalie but outside tight contact zone: clear it
+        ball_speed = np.sqrt(ball_vx**2 + ball_vy**2)
+        if (ball_speed < self.kick_back_min_speed
+                and in_front_ready and dx <= self.stationary_kick_dx):
+            rot_target = self.kick_sign * self.goalie_clear_angle
+            return slide_target, rot_target, True
+
         if in_front_ready and phase == DEFENDING:
             ball_speed = np.sqrt(ball_vx**2 + ball_vy**2)
             cock_back, _ = self._kick_angles(ball_speed)
@@ -313,17 +319,15 @@ class AdvancedStrategy(FoosballStrategy):
             rot_target = self.kick_sign * self.goalie_blocking_angle
             return slide_target, rot_target, False
 
-        # Trap-then-pass logic
-        s, r, cocked = self._trap_and_pass_rotation(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target)
-        if s is not None:
-            return s, r, cocked
-
-        # Standard cock-and-kick fallback
+        # Standard cock-and-kick — aim through nearest opponent gap
         ball_speed = np.sqrt(ball_vx**2 + ball_vy**2)
-        return self._standard_cock_kick(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed)
+        pass_target = self._find_next_rod_target_x(rod_key, ball_x)
+        gap_x = self._find_nearest_opponent_gap(ball_y, preferred_x=pass_target)
+        aim_x = gap_x if gap_x is not None else pass_target
+        return self._standard_cock_kick(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed, ball_x, aim_x)
 
     def _midfield_action(self, rod_key, act_lin, obs, phase, stats):
-        """Midfield: block when defending, trap + pass when attacking/neutral."""
+        """Midfield: block when defending, pass forward when attacking/neutral."""
         ball_x, ball_y = float(obs[0]), float(obs[1])
         ball_vx, ball_vy = float(obs[3]), float(obs[4])
         gx, gy = stats[0], stats[1]
@@ -345,20 +349,15 @@ class AdvancedStrategy(FoosballStrategy):
             rot_target = self.kick_sign * self.goalie_blocking_angle
             return slide_target, rot_target, False
 
-        # Defending phase => standard kick (clear quickly)
+        # Standard cock-and-kick — aim through nearest opponent gap toward attack rod
         ball_speed = np.sqrt(ball_vx**2 + ball_vy**2)
-        if phase == DEFENDING:
-            return self._standard_cock_kick(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed)
-
-        # Otherwise trap-then-pass
-        s, r, cocked = self._trap_and_pass_rotation(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target)
-        if s is not None:
-            return s, r, cocked
-
-        return self._standard_cock_kick(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed)
+        pass_target = self._find_next_rod_target_x(rod_key, ball_x)
+        gap_x = self._find_nearest_opponent_gap(ball_y, preferred_x=pass_target)
+        aim_x = gap_x if gap_x is not None else pass_target
+        return self._standard_cock_kick(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed, ball_x, aim_x)
 
     def _attack_action(self, rod_key, act_lin, obs, phase, stats):
-        """Attack: trap + aimed shot at opponent gaps."""
+        """Attack: aimed shot at opponent gaps."""
         ball_x, ball_y = float(obs[0]), float(obs[1])
         ball_vx, ball_vy = float(obs[3]), float(obs[4])
         gx, gy = stats[0], stats[1]
@@ -375,125 +374,49 @@ class AdvancedStrategy(FoosballStrategy):
         dx = abs(ball_x - gx)
         dy_front = self._dy_front(ball_y, gy)
 
-        # Try trap-then-shoot with gap aiming
+        # Standard cock-and-kick aimed through nearest opponent gap (or goal center)
         ball_speed = np.sqrt(ball_vx**2 + ball_vy**2)
-        s, r, cocked = self._trap_and_shoot_rotation(rod_key, gx, gy, dx, dy_front, ball_x, ball_vy, slide_target, ball_speed)
-        if s is not None:
-            return s, r, cocked
-
-        # Fallback: standard cock-and-kick
-        return self._standard_cock_kick(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed)
-
-    # ------------------------------------------------------------------ #
-    # Trap-then-act
-    # ------------------------------------------------------------------ #
-
-    def _trap_and_pass_rotation(self, rod_key, gx, gy, dx, dy_front, ball_vy, slide_target):
-        """Trap ball, hold, then pass forward with moderate kick.
-        Returns (slide, rot, cocked) or (None, None, None) if not applicable."""
-        ball_speed = abs(ball_vy)
-
-        # Check if already trapping
-        if self.trap_state[rod_key]:
-            self.trap_counter[rod_key] += 1
-            if self.trap_counter[rod_key] >= self.trap_hold_steps:
-                # Release: pass forward
-                self.trap_state[rod_key] = False
-                self.trap_counter[rod_key] = 0
-                rot_target = self.kick_sign * self.pass_kick_angle
-                return slide_target, rot_target, True
-            # Still holding
-            rot_target = self.kick_sign * self.trap_pin_angle
-            return slide_target, rot_target, False
-
-        # Start trap if ball is close, slow, and in front
-        if (dx <= self.trap_dx_thresh and
-                0.0 <= dy_front <= self.trap_dy_thresh and
-                ball_speed < self.trap_vel_thresh):
-            self.trap_state[rod_key] = True
-            self.trap_counter[rod_key] = 0
-            rot_target = self.kick_sign * self.trap_pin_angle
-            return slide_target, rot_target, False
-
-        return None, None, None
-
-    def _trap_and_shoot_rotation(self, rod_key, gx, gy, dx, dy_front, ball_x, ball_vy, slide_target, ball_speed=0.0):
-        """Trap ball, hold, then shoot at widest opponent gap.
-        Returns (slide, rot, cocked) or (None, None, None) if not applicable."""
-
-        # Check if already trapping
-        if self.trap_state[rod_key]:
-            self.trap_counter[rod_key] += 1
-            if self.trap_counter[rod_key] >= self.trap_hold_steps:
-                # Release: aimed shot
-                self.trap_state[rod_key] = False
-                self.trap_counter[rod_key] = 0
-
-                gap_x = self._find_opponent_gap()
-                if gap_x is not None:
-                    slide_offset = (gap_x - ball_x) * 0.3  # partial correction
-                    slide_target += slide_offset
-                    slide_target += np.random.uniform(-0.5, 0.5)
-                else:
-                    slide_target += np.random.uniform(-self.kick_offset_max, self.kick_offset_max)
-
-                _, forward = self._kick_angles(ball_speed)
-                rot_target = self.kick_sign * forward
-                return slide_target, rot_target, True
-            # Still holding
-            rot_target = self.kick_sign * self.trap_pin_angle
-            return slide_target, rot_target, False
-
-        # Start trap if ball is close, slow, and in front
-        if (dx <= self.trap_dx_thresh and
-                0.0 <= dy_front <= self.trap_dy_thresh and
-                ball_speed < self.trap_vel_thresh):
-            self.trap_state[rod_key] = True
-            self.trap_counter[rod_key] = 0
-            rot_target = self.kick_sign * self.trap_pin_angle
-            return slide_target, rot_target, False
-
-        return None, None, None
+        gap_x = self._find_nearest_opponent_gap(ball_y, preferred_x=0.0)
+        aim_x = gap_x if gap_x is not None else 0.0
+        return self._standard_cock_kick(rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed, ball_x, aim_x)
 
     # ------------------------------------------------------------------ #
     # 2-phase kick angle computation
     # ------------------------------------------------------------------ #
 
     def _kick_angles(self, ball_speed):
-        """2-phase kick: variable cock-back (phase 1) + static forward (phase 2).
-        Returns (cock_back_angle, forward_angle)."""
+        """2-phase kick: slow variable cock-back (phase 1) + fast static forward (phase 2).
+        Returns (cock_back_angle, forward_angle).
+        Forward kick is a fixed high value, independent of cock-back."""
         if ball_speed < self.kick_back_min_speed:
             cock_back = self.kick_back_default
         else:
             cock_back = ball_speed * self.kick_back_speed_gain
-        forward = cock_back + self.kick_strike_speed
+        forward = self.kick_strike_speed
         return cock_back, forward
 
     # ------------------------------------------------------------------ #
     # Standard cock-and-kick (fallback, same as BasicStrategy)
     # ------------------------------------------------------------------ #
 
-    def _standard_cock_kick(self, rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed=0.0):
+    def _standard_cock_kick(self, rod_key, gx, gy, dx, dy_front, ball_vy, slide_target, ball_speed=0.0, ball_x=0.0, aim_x=None):
         """Standard cock-and-kick logic, returns (slide, rot, cocked)."""
 
-        # --- Back-approach handling: ball is behind this rod and moving further behind ---
+        # --- Back-approach handling: ball behind rod and moving forward ---
         dy_back = -dy_front
-        if dy_back > self.back_approach_dy_min and self._is_approaching_from_back(ball_vy):
-            # Clear any stale cock state so we don't swing into the ball's path
+        if dy_back > 0 and self._is_approaching_from_back(ball_vy):
             self.rod_cocked_state[rod_key] = False
             self.rod_cocked_y[rod_key] = 0.0
 
-            # Opportunistic back-kick: ball is close behind, slow, and aligned
-            if (dy_back <= self.kick_y_contact_max and
-                    dx <= self.kick_x_contact and
-                    ball_speed < self.trap_vel_thresh):
-                _, forward = self._kick_angles(ball_speed)
-                rot_target = self.kick_sign * forward
+            # Only kick when ball is very close behind and X-aligned
+            if dy_back <= self.back_kick_dy_max and dx <= self.kick_x_close:
+                # Kick strength proportional to ball approach speed
+                kick_angle = self.kick_strike_speed + ball_speed * 0.1
+                rot_target = self.kick_sign * kick_angle
                 return slide_target, rot_target, True
 
-            # Otherwise just lift foosmen out of the way
-            rot_target = self.clear_lane_angle
-            return slide_target, rot_target, False
+            # Ball behind but not close: stay neutral (don't lift)
+            return slide_target, 0.0, False
 
         in_front_ready = (self.kick_y_front_min <= dy_front <= self.kick_y_front_max) and (dx <= self.kick_x_close)
         in_contact = (0.0 <= dy_front <= self.kick_y_contact_max) and (dx <= self.kick_x_contact)
@@ -517,19 +440,42 @@ class AdvancedStrategy(FoosballStrategy):
         cocked = self.rod_cocked_state[rod_key]
         cock_back, forward = self._kick_angles(ball_speed)
 
+        # Stationary ball in range but outside tight contact zone: kick directly.
+        # The rotation arc is large enough to sweep through the ball.
+        if (ball_speed < self.kick_back_min_speed
+                and in_front_ready and not in_contact
+                and dx <= self.stationary_kick_dx):
+            rot_target = self.kick_sign * forward
+            if aim_x is not None:
+                slide_target += (aim_x - ball_x) * 0.7
+                slide_target += np.random.uniform(-0.5, 0.5)
+            return slide_target, rot_target, True
+
         if in_contact:
             slide_target += np.random.uniform(-0.5, 0.5)
 
         if cocked:
-            rot_target = self.kick_sign * cock_back
+            # Only apply cock-back rotation when ball is close; hold neutral otherwise
+            if dy_front <= self.cock_engage_dy_max:
+                rot_target = self.kick_sign * cock_back
+            else:
+                rot_target = 0.0
             if in_contact:
                 rot_target = self.kick_sign * forward
-                slide_target += np.random.uniform(-self.kick_offset_max, self.kick_offset_max)
+                if aim_x is not None:
+                    slide_target += (aim_x - ball_x) * 0.7
+                    slide_target += np.random.uniform(-0.5, 0.5)
+                else:
+                    slide_target += np.random.uniform(-self.kick_offset_max, self.kick_offset_max)
         else:
             rot_target = 0.0
             if approaching_front_fast and in_contact:
                 rot_target = self.kick_sign * forward
-                slide_target += np.random.uniform(-self.kick_offset_max, self.kick_offset_max)
+                if aim_x is not None:
+                    slide_target += (aim_x - ball_x) * 0.7
+                    slide_target += np.random.uniform(-0.5, 0.5)
+                else:
+                    slide_target += np.random.uniform(-self.kick_offset_max, self.kick_offset_max)
 
         return slide_target, rot_target, cocked
 
@@ -581,51 +527,84 @@ class AdvancedStrategy(FoosballStrategy):
     # Opponent gap analysis
     # ------------------------------------------------------------------ #
 
-    def _find_opponent_gap(self):
-        """Find the X coordinate of the widest gap in the opponent's nearest defensive rod.
+    def _find_nearest_opponent_gap(self, ball_y, preferred_x=None):
+        """Find a gap in the nearest opponent rod ahead of the ball.
 
-        Returns gap center X or None if no gaps found.
+        Checks the first opponent rod the ball will encounter in the attack
+        direction, not just goal/def.  If *preferred_x* is given (e.g. the
+        pass-target or goal center), returns the gap whose centre is closest
+        to that value (among gaps wider than 2 units).  Otherwise returns the
+        widest gap.
+
+        Returns gap center X, or None if no opponent rod is ahead.
         """
         opponent = "b" if self.team == "y" else "y"
 
-        # Check opponent goal and def rods (the ones closest to their goal)
-        for opp_rod in ["goal", "def"]:
-            guy_bids = self.env._rod_guy_body_ids(opponent, opp_rod)
+        # Gather opponent rods that are ahead of ball_y in attack direction
+        ahead = []
+        for rod_key in ROD_KEYS:
+            guy_bids = self.env._rod_guy_body_ids(opponent, rod_key)
             if not guy_bids:
                 continue
+            rod_y = float(self.env.data.xpos[guy_bids[0], 1])
+            if self.direction == 1 and rod_y > ball_y:
+                ahead.append((rod_y, guy_bids))
+            elif self.direction == -1 and rod_y < ball_y:
+                ahead.append((rod_y, guy_bids))
 
-            # Get foosman X positions
-            xs = sorted([float(self.env.data.xpos[bid, 0]) for bid in guy_bids])
-            if len(xs) < 2:
-                continue
+        if not ahead:
+            return None
 
-            # Check gaps between adjacent foosmen and between walls and outermost
-            best_gap_center = None
-            best_gap_width = 0.0
+        # Sort nearest-first
+        ahead.sort(key=lambda t: t[0] * self.direction)
 
-            # Gap between left wall and leftmost foosman
-            gap_w = xs[0] - self.table_x_min
-            if gap_w > best_gap_width:
-                best_gap_width = gap_w
-                best_gap_center = (self.table_x_min + xs[0]) / 2.0
+        # Check nearest opponent rod
+        _rod_y, guy_bids = ahead[0]
+        xs = sorted([float(self.env.data.xpos[bid, 0]) for bid in guy_bids])
+        if len(xs) < 2:
+            return None
 
-            # Gaps between adjacent foosmen
-            for j in range(len(xs) - 1):
-                gap_w = xs[j + 1] - xs[j]
-                if gap_w > best_gap_width:
-                    best_gap_width = gap_w
-                    best_gap_center = (xs[j] + xs[j + 1]) / 2.0
+        # Collect all gaps: (center_x, width)
+        gaps = []
+        # left wall → leftmost foosman
+        gaps.append(((self.table_x_min + xs[0]) / 2.0, xs[0] - self.table_x_min))
+        # between adjacent foosmen
+        for j in range(len(xs) - 1):
+            gaps.append(((xs[j] + xs[j + 1]) / 2.0, xs[j + 1] - xs[j]))
+        # rightmost foosman → right wall
+        gaps.append(((xs[-1] + self.table_x_max) / 2.0, self.table_x_max - xs[-1]))
 
-            # Gap between rightmost foosman and right wall
-            gap_w = self.table_x_max - xs[-1]
-            if gap_w > best_gap_width:
-                best_gap_width = gap_w
-                best_gap_center = (xs[-1] + self.table_x_max) / 2.0
+        if not gaps:
+            return None
 
-            if best_gap_center is not None:
-                return best_gap_center
+        # If a preferred direction is given, pick the nearest sufficiently-wide gap
+        if preferred_x is not None:
+            min_width = 2.0
+            valid = [(c, w) for c, w in gaps if w >= min_width]
+            if valid:
+                return min(valid, key=lambda g: abs(g[0] - preferred_x))[0]
 
-        return None
+        # Fallback: widest gap
+        return max(gaps, key=lambda g: g[1])[0]
+
+    def _find_next_rod_target_x(self, rod_key, ball_x):
+        """Find X of the nearest foosman on the next forward friendly rod.
+
+        Used for deliberate pass targeting — aim passes at a specific
+        receiving foosman rather than kicking blindly forward.
+        Returns target X or None if no next rod or no foosmen found.
+        """
+        next_rod = _NEXT_ROD.get(rod_key)
+        if next_rod is None:
+            return None
+        guy_bids = self.env._rod_guy_body_ids(self.team, next_rod)
+        if not guy_bids:
+            return None
+        xs = [float(self.env.data.xpos[bid, 0]) for bid in guy_bids]
+        if not xs:
+            return None
+        # Pick the foosman closest to the ball for best reception
+        return min(xs, key=lambda x: abs(x - ball_x))
 
     # ------------------------------------------------------------------ #
     # Direction helpers (same as BasicStrategy)
