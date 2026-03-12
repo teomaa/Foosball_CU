@@ -1,1 +1,0 @@
-python IsaacLab/scripts/reinforcement_learning/sb3/train.py --task=Foosball-1player-v0 --headless --video --video_interval 10000 --video_length 500 --max_iterations 1000

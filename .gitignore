@@ -1,3 +1,6 @@
+/logs/
+/outputs/
+
 /IsaacLab/*
 
 /IsaacLab/.gitignore
