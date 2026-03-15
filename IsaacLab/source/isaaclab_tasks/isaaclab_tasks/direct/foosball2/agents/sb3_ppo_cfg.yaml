@@ -7,7 +7,7 @@ n_steps: 256
 batch_size: 4096
 gae_lambda: 0.95
 gamma: 0.97
-n_epochs: 200
+n_epochs: 8
 ent_coef: 0.1
 learning_rate: lin_3e-4
 clip_range: !!float 0.2
@@ -17,4 +17,4 @@ policy_kwargs:
   squash_output: False
 vf_coef: 0.8
 max_grad_norm: 0.5
-device: "cpu"
+device: "cuda:0"

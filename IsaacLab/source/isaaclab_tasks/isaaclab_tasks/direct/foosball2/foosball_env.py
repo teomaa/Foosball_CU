@@ -30,8 +30,8 @@ class FoosballEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
     episode_length_s = 10.0 #5 12/19
-    prismatic_action_scale=  12#10#160
-    revolute_action_scale= 12#4#40   
+    prismatic_action_scale=  8#12#10#160
+    revolute_action_scale= 3#5#12#4#40
     action_space = 8
     observation_space = 41
     state_space = 0
@@ -167,21 +167,38 @@ class FoosballEnv(DirectRLEnv):
 
 
     def _apply_action(self) -> None:
-        #print(self.object_pos)
-
         n_wp = len(self.white_prismatic_dof_indices)
         n_wr = len(self.white_revolute_dof_indices)
 
         wp = self.actions[:, 0:n_wp]   # prismatic
         wr = self.actions[:, n_wp:n_wp+n_wr]  # revolute
-        #wr = torch.clamp(wr, -0.5, 0.5)  #12_15 change
-        
+
         self.robot.set_joint_effort_target(
             wp*self.prismatic_action_scale, joint_ids=self.white_prismatic_dof_indices
         )
 
+        # Hard revolute joint position limits: clamp to ±π
+        # Strong restoring torque + zero out agent effort when past limit
+        rev_pos = self.joint_pos[:, self.white_revolute_dof_indices]
+        rev_limit = math.pi
+        restoring_stiffness = 50.0
+
+        over_max = (rev_pos > rev_limit).float()
+        under_min = (rev_pos < -rev_limit).float()
+        in_bounds = 1.0 - over_max - under_min
+
+        # Only allow agent torque that pushes back toward center when at limits
+        agent_torque = wr * self.revolute_action_scale
+        # Zero out torque pushing further past limits
+        agent_torque = agent_torque * in_bounds \
+            + agent_torque.clamp(max=0.0) * over_max \
+            + agent_torque.clamp(min=0.0) * under_min
+
+        restoring_torque = -restoring_stiffness * over_max * (rev_pos - rev_limit) \
+                         + -restoring_stiffness * under_min * (rev_pos + rev_limit)
+
         self.robot.set_joint_effort_target(
-            wr*self.revolute_action_scale, joint_ids=self.white_revolute_dof_indices
+            agent_torque + restoring_torque, joint_ids=self.white_revolute_dof_indices
         )
 
         assert not torch.isnan(self.actions).any(), "NaN in actions"
@@ -203,20 +220,12 @@ class FoosballEnv(DirectRLEnv):
             ),
             dim=-1,
         )
-        #print(obs)
-        
-        #Debugger
-        assert not torch.isnan(self.joint_pos).any(), "NaN in joint_pos"
-        assert not torch.isnan(self.joint_vel).any(), "NaN in joint_vel"
-        assert not torch.isnan(self.object_pos).any(), "NaN in object_pos"
-        assert not torch.isnan(self.object_velocities).any(), "NaN in object_velocities"
-        #print("OBS:", obs)
-        #print("NaNs in obs:", torch.isnan(obs).any())
-        #print("Infs in obs:", torch.isinf(obs).any())
-        #obs_std = torch.std(obs, dim=0)
-        #assert not torch.isnan(obs_std).any(), "NaN in observation std!"
-        #assert not torch.isinf(obs_std).any(), "Inf in observation std!"
-        
+
+        # Clamp observations to prevent gradient explosion and NaN in policy network
+        obs = torch.clamp(obs, -20.0, 20.0)
+        # Replace any NaN/Inf from physics glitches with zeros
+        obs = torch.nan_to_num(obs, nan=0.0, posinf=20.0, neginf=-20.0)
+
         observations = {"policy": obs}
         return observations
 
@@ -224,8 +233,9 @@ class FoosballEnv(DirectRLEnv):
          
         base_reward = compute_rewards(
             self.object_pos,)
-        #action_penalty=0.01 * torch.sum(self.actions**2, dim=-1)
-        total_reward=base_reward#-action_penalty
+        revolute_actions = self.actions[:, 4:8]
+        action_penalty = 0.05 * torch.sum(revolute_actions**2, dim=-1)
+        total_reward = base_reward - action_penalty
 
         return total_reward
 
