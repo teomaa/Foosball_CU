@@ -10,7 +10,7 @@ from numpy import random
 import torch
 from collections.abc import Sequence
 
-from isaaclab_assets.robots.foosball import FOOSBALL_CFG
+from isaaclab_assets.robots.foosball import FOOSBALL_CFG, FOOSBALL_VS_CFG
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, ArticulationCfg,RigidObjectCfg,RigidObject
@@ -31,10 +31,15 @@ class FoosballEnvCfg(DirectRLEnvCfg):
     decimation = 2
     episode_length_s = 10.0 #5 12/19
     prismatic_action_scale=  8#12#10#160
-    revolute_action_scale= 3#5#12#4#40
+    revolute_action_scale= 8#3#5#12#4#40
     action_space = 8
     observation_space = 41
     state_space = 0
+    revolute_action_penalty: bool = False  # Penalize revolute actions (0.05 * sum of squares)
+
+    # opponent (frozen model)
+    opponent_checkpoint: str | None = None    # Path to SB3 PPO .zip
+    opponent_deterministic: bool = True       # Deterministic opponent actions
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -50,7 +55,6 @@ class FoosballEnvCfg(DirectRLEnvCfg):
     )
     # robot
     robot_cfg: ArticulationCfg = FOOSBALL_CFG.replace(prim_path="/World/envs/env_.*/Foosball")
-
 
     # in-game Ball
     object_cfg: RigidObjectCfg = RigidObjectCfg(
@@ -76,6 +80,11 @@ class FoosballEnvCfg(DirectRLEnvCfg):
     )
     # scene
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1024, env_spacing=2.0, replicate_physics=True)
+
+
+@configclass
+class FoosballVsEnvCfg(FoosballEnvCfg):
+    robot_cfg: ArticulationCfg = FOOSBALL_VS_CFG.replace(prim_path="/World/envs/env_.*/Foosball")
 
 
 class FoosballEnv(DirectRLEnv):
@@ -143,6 +152,55 @@ class FoosballEnv(DirectRLEnv):
         self.revolute_action_scale = self.cfg.revolute_action_scale
         #Add goal tracker to tensorboard
         self.goal_scored = torch.zeros(self.scene.num_envs, device=self.device, dtype=torch.float32)
+        self.black_goal_scored = torch.zeros(self.scene.num_envs, device=self.device, dtype=torch.float32)
+
+        # --- Frozen opponent model ---
+        self.opponent_model = None
+        if self.cfg.opponent_checkpoint is not None:
+            from stable_baselines3 import PPO
+            self.opponent_model = PPO.load(self.cfg.opponent_checkpoint, device=self.device)
+            self.opponent_model.policy.set_training_mode(False)
+            print(f"[INFO] Loaded frozen opponent from {self.cfg.opponent_checkpoint}")
+
+            # Build mirror index/sign tensors for observation mirroring.
+            # The frozen model was trained as white; to play as black we swap
+            # white<->black joint indices and negate ball_pos_x / ball_vel_x.
+            #
+            # Obs layout: [joint_pos(16), joint_vel(16), ball_pos(3), ball_vel(6)] = 41
+            # joint order (sorted DOF indices): 8 white then 8 black (or interleaved —
+            # we build the mapping from actual DOF indices).
+
+            n_joints = 16  # total joints
+            # Build white->black and black->white index mapping for joints
+            wp = self.white_prismatic_dof_indices  # 4 indices
+            wr = self.white_revolute_dof_indices    # 4 indices
+            bp = self.black_prismatic_dof_indices   # 4 indices
+            br = self.black_revolute_dof_indices    # 4 indices
+
+            joint_swap = list(range(n_joints))
+            # Swap each white joint with corresponding black joint (same rod type)
+            for w, b in zip(wp, bp):
+                joint_swap[w] = b
+                joint_swap[b] = w
+            for w, b in zip(wr, br):
+                joint_swap[w] = b
+                joint_swap[b] = w
+
+            mirror_indices = list(range(41))
+            # joint_pos block (0..15): swap white<->black
+            for i in range(n_joints):
+                mirror_indices[i] = joint_swap[i]
+            # joint_vel block (16..31): swap white<->black
+            for i in range(n_joints):
+                mirror_indices[16 + i] = 16 + joint_swap[i]
+            # ball_pos (32,33,34) and ball_vel (35..40) stay in place
+
+            self.mirror_indices = torch.tensor(mirror_indices, device=self.device, dtype=torch.long)
+
+            mirror_signs = torch.ones(41, device=self.device, dtype=torch.float32)
+            mirror_signs[32] = -1.0  # ball_pos_x
+            mirror_signs[35] = -1.0  # ball_vel_x
+            self.mirror_signs = mirror_signs
 
 
     def _setup_scene(self):
@@ -203,13 +261,49 @@ class FoosballEnv(DirectRLEnv):
 
         assert not torch.isnan(self.actions).any(), "NaN in actions"
         assert not torch.isinf(self.actions).any(), "Inf actions!"
-        #random noise to other player
-        
-        
-        #blackeffort=(random.randint(20)-10)*0.2
-        #self.robot.set_joint_effort_target(
-        #    blackeffort, joint_ids=self.black_dof_indices
-        #)
+
+        # --- Frozen opponent actions (black team) ---
+        if self.opponent_model is not None:
+            raw_obs = torch.cat((self.joint_pos, self.joint_vel, self.object_pos, self.object_velocities), dim=-1)
+            raw_obs = torch.clamp(raw_obs, -20.0, 20.0)
+            raw_obs = torch.nan_to_num(raw_obs, nan=0.0, posinf=20.0, neginf=-20.0)
+            mirrored_obs = self._mirror_obs_for_opponent(raw_obs)
+
+            with torch.no_grad():
+                opp_actions, _, _ = self.opponent_model.policy.forward(mirrored_obs, deterministic=self.cfg.opponent_deterministic)
+            opp_actions = torch.clamp(opp_actions, -1.0, 1.0)
+
+            opp_bp = opp_actions[:, 0:4]
+            opp_br = opp_actions[:, 4:8]
+
+            self.robot.set_joint_effort_target(
+                opp_bp * self.prismatic_action_scale, joint_ids=self.black_prismatic_dof_indices
+            )
+
+            # Same revolute limit enforcement as white
+            black_rev_pos = self.joint_pos[:, self.black_revolute_dof_indices]
+            rev_limit = math.pi
+            restoring_stiffness = 50.0
+
+            over_max_b = (black_rev_pos > rev_limit).float()
+            under_min_b = (black_rev_pos < -rev_limit).float()
+            in_bounds_b = 1.0 - over_max_b - under_min_b
+
+            opp_torque = opp_br * self.revolute_action_scale
+            opp_torque = opp_torque * in_bounds_b \
+                + opp_torque.clamp(max=0.0) * over_max_b \
+                + opp_torque.clamp(min=0.0) * under_min_b
+
+            restoring_torque_b = -restoring_stiffness * over_max_b * (black_rev_pos - rev_limit) \
+                               + -restoring_stiffness * under_min_b * (black_rev_pos + rev_limit)
+
+            self.robot.set_joint_effort_target(
+                opp_torque + restoring_torque_b, joint_ids=self.black_revolute_dof_indices
+            )
+    def _mirror_obs_for_opponent(self, obs: torch.Tensor) -> torch.Tensor:
+        """Mirror observations so a white-trained model can play as black."""
+        return obs[:, self.mirror_indices] * self.mirror_signs
+
     def _get_observations(self) -> dict:
         obs = torch.cat(
             (
@@ -230,12 +324,19 @@ class FoosballEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
-         
+
         base_reward = compute_rewards(
             self.object_pos,)
-        revolute_actions = self.actions[:, 4:8]
-        action_penalty = 0.05 * torch.sum(revolute_actions**2, dim=-1)
-        total_reward = base_reward - action_penalty
+        total_reward = base_reward
+
+        if self.cfg.revolute_action_penalty:
+            revolute_actions = self.actions[:, 4:8]
+            total_reward = total_reward - 0.05 * torch.sum(revolute_actions**2, dim=-1)
+
+        # Penalize when opponent scores (ball in white's goal)
+        if self.opponent_model is not None:
+            opponent_scored = black_goal(self.object_pos)
+            total_reward[opponent_scored] -= 10.0
 
         return total_reward
 
@@ -254,10 +355,12 @@ class FoosballEnv(DirectRLEnv):
         #print(f"off table: {out_of_bounds}")
 
         white_scored = white_goal(self.object_pos)
+        black_scored = black_goal(self.object_pos)
 
-        out_of_bounds = white_goal(self.object_pos) | black_goal(self.object_pos) |fell_off_table |ball_too_high
+        out_of_bounds = white_scored | black_scored | fell_off_table | ball_too_high
         self.goal_scored = white_scored.float()
-        
+        self.black_goal_scored = black_scored.float()
+
         return out_of_bounds, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | torch.Tensor | None):
@@ -267,9 +370,12 @@ class FoosballEnv(DirectRLEnv):
             # ----- LOGGING -----
         if self.extras is not None:
             self.extras["goal_scored_pct"] = torch.mean(self.goal_scored[env_ids])
+            if self.opponent_model is not None:
+                self.extras["opponent_goal_scored_pct"] = torch.mean(self.black_goal_scored[env_ids])
 
         # Reset tracker
         self.goal_scored[env_ids] = 0.0
+        self.black_goal_scored[env_ids] = 0.0
         
         
         super()._reset_idx(env_ids)
@@ -340,7 +446,7 @@ def compute_rewards(
     score = torch.zeros(object_pos.shape[0], dtype=torch.float32, device=device)
     
     # Check if white team scored a goal
-    score[white_goal(object_pos)] = 500
+    score[white_goal(object_pos)] = 10
 
     # Check if black team scored a goal
     #score[black_goal(object_pos)] = -100
@@ -356,7 +462,7 @@ def compute_rewards(
     #print(f"X dist: {x_dist_to_goal_white}")
     dist_to_goal_white= torch.sqrt(x_dist_to_goal_white + y_dist)
 
-    dist_penalty = -0.5 * torch.tanh(3.0 * dist_to_goal_white)
+    dist_penalty = -1.0 * torch.tanh(3.0 * dist_to_goal_white)
     #dist_goal_clamped=torch.clamp(dist_to_goal_white, min=1e-4, max=2.0)
     
     #Revised Reward

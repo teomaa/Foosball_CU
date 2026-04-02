@@ -6,15 +6,15 @@ policy: 'MlpPolicy'
 n_steps: 256
 batch_size: 4096
 gae_lambda: 0.95
-gamma: 0.97
+gamma: 0.99
 n_epochs: 8
-ent_coef: 0.1
+ent_coef: 0.005
 learning_rate: lin_3e-4
 clip_range: !!float 0.2
 policy_kwargs:
-  activation_fn: nn.ReLU
+  activation_fn: nn.ELU
   net_arch: [512, 512, 256]
   squash_output: False
-vf_coef: 0.8
+vf_coef: 0.5
 max_grad_norm: 0.5
 device: "cuda:0"
