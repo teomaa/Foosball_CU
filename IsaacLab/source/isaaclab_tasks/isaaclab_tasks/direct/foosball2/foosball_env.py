@@ -31,7 +31,7 @@ class FoosballEnvCfg(DirectRLEnvCfg):
     decimation = 2
     episode_length_s = 10.0 #5 12/19
     prismatic_action_scale=  8#12#10#160
-    revolute_action_scale= 8#3#5#12#4#40
+    revolute_action_scale= 12#8#3#5#12#4#40
     action_space = 8
     observation_space = 41
     state_space = 0
@@ -529,7 +529,7 @@ def compute_rewards(
     score = torch.zeros(object_pos.shape[0], dtype=torch.float32, device=device)
     
     # Check if white team scored a goal
-    score[white_goal(object_pos)] = 10
+    score[white_goal(object_pos)] = 500
 
     # Check if black team scored a goal
     #score[black_goal(object_pos)] = -100
@@ -545,7 +545,7 @@ def compute_rewards(
     #print(f"X dist: {x_dist_to_goal_white}")
     dist_to_goal_white= torch.sqrt(x_dist_to_goal_white + y_dist)
 
-    dist_penalty = -1.0 * torch.tanh(3.0 * dist_to_goal_white)
+    dist_penalty = -0.5 * torch.tanh(3.0 * dist_to_goal_white)
     #dist_goal_clamped=torch.clamp(dist_to_goal_white, min=1e-4, max=2.0)
     
     #Revised Reward

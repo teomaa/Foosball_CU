@@ -21,17 +21,17 @@ from video_callback import IsaacLabVideoCallback
 parser = argparse.ArgumentParser(description="Train an RL agent with Stable-Baselines3.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
-parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
+parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in env steps).")
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--agent", type=str, default="sb3_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
-parser.add_argument("--log_interval", type=int, default=100_000, help="Log data every n timesteps.")
+parser.add_argument("--log_interval", type=int, default=100, help="Log data every N env steps.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Continue the training from checkpoint.")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
-parser.add_argument("--save_freq", type=int, default=10000, help="Save a checkpoint every N agent steps.")
+parser.add_argument("--save_freq", type=int, default=10000, help="Save a checkpoint every N steps.")
 parser.add_argument("--opponent", type=str, default=None, help="Path to frozen opponent SB3 PPO checkpoint (.zip)")
 parser.add_argument("--ghost_level_steps", type=int, default=0, help="Ghost curriculum: increase level every N env steps (0=no auto-increase)")
 parser.add_argument("--ghost_min_level", type=int, default=0, help="Ghost curriculum: starting level (0-6)")
@@ -213,19 +213,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent = agent.load(args_cli.checkpoint, env, print_system_info=True)
 
     # callbacks for agent
+    num_envs = env.unwrapped.num_envs
     checkpoint_callback = CheckpointCallback(save_freq=args_cli.save_freq, save_path=log_dir, name_prefix="model", verbose=2)
-    callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
+    callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval * num_envs)]
 
     if args_cli.video:
         video_callback = IsaacLabVideoCallback(
             env=env,
             video_folder=os.path.join(log_dir, "videos", "train"),
-            video_interval=args_cli.video_interval,
+            video_interval=args_cli.video_interval * num_envs,
             video_length=args_cli.video_length,
             verbose=1,
         )
         callbacks.append(video_callback)
-        print(f"[INFO] Recording videos via callback every {args_cli.video_interval} timesteps")
+        print(f"[INFO] Recording videos via callback every {args_cli.video_interval} env steps")
 
     # train the agent
     with contextlib.suppress(KeyboardInterrupt):
