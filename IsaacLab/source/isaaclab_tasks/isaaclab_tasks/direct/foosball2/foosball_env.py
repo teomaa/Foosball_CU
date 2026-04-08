@@ -71,7 +71,7 @@ class FoosballEnvCfg(DirectRLEnvCfg):
                 solver_velocity_iteration_count=4,
                 sleep_threshold=0.005,
                 stabilization_threshold=0.01,
-                max_depenetration_velocity=100.0,
+                max_depenetration_velocity=2.0,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             mass_props=sim_utils.MassPropertiesCfg(density=380.0),  #changed ball density
