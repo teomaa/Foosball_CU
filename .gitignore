@@ -3,6 +3,15 @@
 
 /IsaacLab/*
 
+!/IsaacLab/scripts/
+/IsaacLab/scripts/*
+!/IsaacLab/scripts/reinforcement_learning/
+/IsaacLab/scripts/reinforcement_learning/*
+!/IsaacLab/scripts/reinforcement_learning/sb3/
+/IsaacLab/scripts/reinforcement_learning/sb3/*
+!/IsaacLab/scripts/reinforcement_learning/sb3/train.py
+!/IsaacLab/scripts/reinforcement_learning/sb3/play.py
+
 /IsaacLab/.gitignore
 
 /IsaacLab/.vscode/*
