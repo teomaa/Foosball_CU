@@ -41,3 +41,23 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Foosball-vsghost-v0",
+    entry_point=f"{__name__}.foosball_env:FoosballEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.foosball_env:FoosballGhostEnvCfg",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Foosball-ghostdemo-v0",
+    entry_point=f"{__name__}.foosball_env:FoosballEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.foosball_env:FoosballGhostDemoEnvCfg",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+

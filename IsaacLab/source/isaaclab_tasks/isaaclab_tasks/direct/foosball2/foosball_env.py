@@ -87,6 +87,22 @@ class FoosballVsEnvCfg(FoosballEnvCfg):
     robot_cfg: ArticulationCfg = FOOSBALL_VS_CFG.replace(prim_path="/World/envs/env_.*/Foosball")
 
 
+@configclass
+class FoosballGhostEnvCfg(FoosballEnvCfg):
+    """Config for training against a ghost opponent with curriculum."""
+    robot_cfg: ArticulationCfg = FOOSBALL_VS_CFG.replace(prim_path="/World/envs/env_.*/Foosball")
+    ghost_min_level: int = 0
+    ghost_level_steps: int = 0  # 0 = no auto-increase
+
+
+@configclass
+class FoosballGhostDemoEnvCfg(FoosballEnvCfg):
+    """Config for demo mode with a fixed ghost level."""
+    robot_cfg: ArticulationCfg = FOOSBALL_VS_CFG.replace(prim_path="/World/envs/env_.*/Foosball")
+    ghost_level: int = 0
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.0, replicate_physics=True)
+
+
 class FoosballEnv(DirectRLEnv):
     cfg: FoosballEnvCfg
 
@@ -202,6 +218,20 @@ class FoosballEnv(DirectRLEnv):
             mirror_signs[35] = -1.0  # ball_vel_x
             self.mirror_signs = mirror_signs
 
+        # --- Ghost opponent ---
+        self.ghost_opponent = None
+        if isinstance(self.cfg, FoosballGhostDemoEnvCfg):
+            from .ghost_opponent import GhostOpponent
+            self.ghost_opponent = GhostOpponent(self.scene.num_envs, self.device)
+            self.ghost_opponent.set_level(self.cfg.ghost_level)
+            print(f"[INFO] Ghost opponent active (demo mode, level {self.cfg.ghost_level})")
+        elif isinstance(self.cfg, FoosballGhostEnvCfg):
+            from .ghost_opponent import GhostOpponent
+            self.ghost_opponent = GhostOpponent(self.scene.num_envs, self.device)
+            self._ghost_current_level = self.cfg.ghost_min_level
+            self.ghost_opponent.set_level(self._ghost_current_level)
+            print(f"[INFO] Ghost opponent active (curriculum, start level {self._ghost_current_level}, "
+                  f"level_steps={self.cfg.ghost_level_steps})")
 
     def _setup_scene(self):
         self.robot = Articulation(self.cfg.robot_cfg)
@@ -300,6 +330,42 @@ class FoosballEnv(DirectRLEnv):
             self.robot.set_joint_effort_target(
                 opp_torque + restoring_torque_b, joint_ids=self.black_revolute_dof_indices
             )
+
+        # --- Ghost opponent actions (black team) ---
+        if self.ghost_opponent is not None:
+            black_pris_pos = self.joint_pos[:, self.black_prismatic_dof_indices]
+            black_pris_vel = self.joint_vel[:, self.black_prismatic_dof_indices]
+            black_rev_pos = self.joint_pos[:, self.black_revolute_dof_indices]
+            black_rev_vel = self.joint_vel[:, self.black_revolute_dof_indices]
+
+            ghost_pris_effort, ghost_rev_effort = self.ghost_opponent.compute_actions(
+                black_pris_pos, black_pris_vel, black_rev_pos, black_rev_vel,
+                self.object_pos, self.object_velocities,
+            )
+
+            self.robot.set_joint_effort_target(
+                ghost_pris_effort, joint_ids=self.black_prismatic_dof_indices
+            )
+
+            # Same revolute limit enforcement as white/frozen opponent
+            rev_limit = math.pi
+            restoring_stiffness = 50.0
+            over_max_g = (black_rev_pos > rev_limit).float()
+            under_min_g = (black_rev_pos < -rev_limit).float()
+            in_bounds_g = 1.0 - over_max_g - under_min_g
+
+            ghost_torque = ghost_rev_effort
+            ghost_torque = ghost_torque * in_bounds_g \
+                + ghost_torque.clamp(max=0.0) * over_max_g \
+                + ghost_torque.clamp(min=0.0) * under_min_g
+
+            restoring_torque_g = -restoring_stiffness * over_max_g * (black_rev_pos - rev_limit) \
+                               + -restoring_stiffness * under_min_g * (black_rev_pos + rev_limit)
+
+            self.robot.set_joint_effort_target(
+                ghost_torque + restoring_torque_g, joint_ids=self.black_revolute_dof_indices
+            )
+
     def _mirror_obs_for_opponent(self, obs: torch.Tensor) -> torch.Tensor:
         """Mirror observations so a white-trained model can play as black."""
         return obs[:, self.mirror_indices] * self.mirror_signs
@@ -334,13 +400,25 @@ class FoosballEnv(DirectRLEnv):
             total_reward = total_reward - 0.05 * torch.sum(revolute_actions**2, dim=-1)
 
         # Penalize when opponent scores (ball in white's goal)
-        if self.opponent_model is not None:
+        if self.opponent_model is not None or self.ghost_opponent is not None:
             opponent_scored = black_goal(self.object_pos)
             total_reward[opponent_scored] -= 10.0
 
         return total_reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        # --- Ghost curriculum level progression ---
+        if self.ghost_opponent is not None and isinstance(self.cfg, FoosballGhostEnvCfg):
+            if self.cfg.ghost_level_steps > 0:
+                desired_level = min(
+                    6,
+                    self.cfg.ghost_min_level + self.common_step_counter // self.cfg.ghost_level_steps
+                )
+                if desired_level != self._ghost_current_level:
+                    self._ghost_current_level = desired_level
+                    self.ghost_opponent.set_level(desired_level)
+                    print(f"[INFO] Ghost level -> {desired_level} at step {self.common_step_counter}")
+
         self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
         self.object_velocities = self.object.data.root_vel_w
         time_out = self.episode_length_buf >= self.max_episode_length #- 1
@@ -370,14 +448,19 @@ class FoosballEnv(DirectRLEnv):
             # ----- LOGGING -----
         if self.extras is not None:
             self.extras["goal_scored_pct"] = torch.mean(self.goal_scored[env_ids])
-            if self.opponent_model is not None:
+            if self.opponent_model is not None or self.ghost_opponent is not None:
                 self.extras["opponent_goal_scored_pct"] = torch.mean(self.black_goal_scored[env_ids])
+            if self.ghost_opponent is not None:
+                self.extras["ghost_level"] = float(self.ghost_opponent.level)
 
         # Reset tracker
         self.goal_scored[env_ids] = 0.0
         self.black_goal_scored[env_ids] = 0.0
-        
-        
+
+        # Reset ghost state for terminated envs
+        if self.ghost_opponent is not None:
+            self.ghost_opponent.reset(env_ids)
+
         super()._reset_idx(env_ids)
         
         object_default_state = self.object.data.default_root_state.clone()[env_ids]

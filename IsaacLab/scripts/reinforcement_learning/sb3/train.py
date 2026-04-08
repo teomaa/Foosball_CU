@@ -31,7 +31,10 @@ parser.add_argument("--seed", type=int, default=None, help="Seed used for the en
 parser.add_argument("--log_interval", type=int, default=100_000, help="Log data every n timesteps.")
 parser.add_argument("--checkpoint", type=str, default=None, help="Continue the training from checkpoint.")
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument("--save_freq", type=int, default=10000, help="Save a checkpoint every N agent steps.")
 parser.add_argument("--opponent", type=str, default=None, help="Path to frozen opponent SB3 PPO checkpoint (.zip)")
+parser.add_argument("--ghost_level_steps", type=int, default=0, help="Ghost curriculum: increase level every N env steps (0=no auto-increase)")
+parser.add_argument("--ghost_min_level", type=int, default=0, help="Ghost curriculum: starting level (0-6)")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
     "--keep_all_info",
@@ -132,6 +135,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.opponent is not None:
         env_cfg.opponent_checkpoint = args_cli.opponent
 
+    # ghost opponent curriculum settings
+    if hasattr(env_cfg, "ghost_level_steps"):
+        env_cfg.ghost_level_steps = args_cli.ghost_level_steps
+    if hasattr(env_cfg, "ghost_min_level"):
+        env_cfg.ghost_min_level = args_cli.ghost_min_level
+
     # directory for logging into
     run_info = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_root_path = os.path.abspath(os.path.join("logs", "sb3", args_cli.task))
@@ -204,7 +213,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent = agent.load(args_cli.checkpoint, env, print_system_info=True)
 
     # callbacks for agent
-    checkpoint_callback = CheckpointCallback(save_freq=1000, save_path=log_dir, name_prefix="model", verbose=2)
+    checkpoint_callback = CheckpointCallback(save_freq=args_cli.save_freq, save_path=log_dir, name_prefix="model", verbose=2)
     callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
 
     if args_cli.video:

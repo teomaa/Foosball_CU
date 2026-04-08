@@ -15,11 +15,12 @@ The vast majority of this repo is the IsaacLab framework (vendored in `IsaacLab/
 **IsaacLab foosball task (the main RL environment):**
 - `IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/foosball2/` - Task definition
   - `foosball_env.py` - Main environment (`FoosballEnv`, `FoosballEnvCfg`). This is the core file.
-  - `__init__.py` - Gym registration (env id: `Foosball-1player-v0`)
+  - `ghost_opponent.py` - Hardcoded ghost opponent with 7 difficulty levels (0-6)
+  - `__init__.py` - Gym registration (`Foosball-1player-v0`, `Foosball-vs-v0`, `Foosball-vsghost-v0`, `Foosball-ghostdemo-v0`)
   - `agents/` - RL algorithm config files (PPO configs for rl_games, skrl, sb3, rsl_rl)
 
 **IsaacLab foosball asset:**
-- `IsaacLab/source/isaaclab_assets/isaaclab_assets/robots/foosball.py` - `FOOSBALL_CFG` articulation config (joint definitions, actuators)
+- `IsaacLab/source/isaaclab_assets/isaaclab_assets/robots/foosball.py` - `FOOSBALL_CFG`, `FOOSBALL_VS_CFG` articulation configs (joint definitions, actuators)
 - `IsaacLab/source/isaaclab_assets/isaaclab_assets/robots/__init__.py` - Exports foosball config
 
 **Standalone copies / setup scripts (STALE — do not edit):**
@@ -58,3 +59,11 @@ The `isaaclab_tasks`, `isaaclab_assets`, and `isaaclab_rl` packages are pip-inst
 2. The editable install: `/home/yw3809/Projects/foosball/IsaacLab/source/isaaclab_tasks/...` (what actually runs)
 
 If you only edit the repo copy, the change will have no effect at runtime.
+
+## Ghost Opponent
+
+A hardcoded ghost opponent with 7 difficulty levels (0-6) for curriculum training. See `README.md` for full documentation.
+
+- **Training task:** `Foosball-vsghost-v0` with `--ghost_min_level` and `--ghost_level_steps` flags
+- **Demo task:** `Foosball-ghostdemo-v0` with `--ghost_level N` flag
+- **Ghost logic:** `IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/foosball2/ghost_opponent.py`

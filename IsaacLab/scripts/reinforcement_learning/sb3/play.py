@@ -39,6 +39,7 @@ parser.add_argument(
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument("--opponent", type=str, default=None, help="Path to a frozen opponent model (.zip) for vs-mode envs.")
+parser.add_argument("--ghost_level", type=int, default=0, help="Ghost level (0-6) for Foosball-ghostdemo-v0 task")
 parser.add_argument(
     "--keep_all_info",
     action="store_true",
@@ -111,6 +112,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # pass frozen opponent checkpoint to env (for vs-mode envs)
     if args_cli.opponent is not None and hasattr(env_cfg, "opponent_checkpoint"):
         env_cfg.opponent_checkpoint = args_cli.opponent
+
+    # Ghost demo level
+    if hasattr(env_cfg, "ghost_level"):
+        env_cfg.ghost_level = args_cli.ghost_level
 
     # directory for logging into
     log_root_path = os.path.join("logs", "sb3", train_task_name)
