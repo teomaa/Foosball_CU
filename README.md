@@ -1,17 +1,108 @@
 # Foosball_CU
-Design and development of a professional foosball playing AI.
-The directory is organized under 3 teams - Mechanical Assets, Simulation, and AI agents
+
+Design and development of a professional foosball playing AI using reinforcement learning on NVIDIA IsaacLab (Isaac Sim).
+
+## Quick Start
+
+Training and inference use two scripts in `IsaacLab/scripts/reinforcement_learning/sb3/`:
+
+```bash
+# Train PPO agent against static opponent (black rods locked up)
+python IsaacLab/scripts/reinforcement_learning/sb3/train.py --task Foosball-1player-v0
+
+# Watch a trained agent play
+python IsaacLab/scripts/reinforcement_learning/sb3/play.py --task Foosball-1player-v0 --checkpoint /path/to/model.zip
+```
+
+## Environments
+
+| Task ID | Description |
+|---------|-------------|
+| `Foosball-1player-v0` | Single-player training. Black team rods are locked up (no opponent). |
+| `Foosball-vs-v0` | Play against a frozen PPO model loaded from a checkpoint. Requires `--opponent`. |
+| `Foosball-vsghost-v0` | Train against a hardcoded ghost opponent with curriculum levels 0-6. |
+| `Foosball-ghostdemo-v0` | Demo a specific ghost level (1 env, play-only). Requires `--ghost_level`. |
+
+All environments share the same core: white team (agent) controls 4 rods (Keeper, Defense, Mid, Offense) with 8 actions (4 prismatic slide + 4 revolute spin). Observation is 41-dim: joint positions (16) + joint velocities (16) + ball position (3) + ball velocity (6).
+
+## train.py
+
+```bash
+python IsaacLab/scripts/reinforcement_learning/sb3/train.py --task <TASK_ID> [OPTIONS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--task` | required | Environment task ID (see table above) |
+| `--num_envs` | 1024 | Number of parallel environments |
+| `--max_iterations` | from config | Total RL training iterations |
+| `--checkpoint` | — | Resume training from a saved `.zip` checkpoint |
+| `--save_freq` | 10000 | Save a checkpoint every N agent steps |
+| `--seed` | from config | Random seed |
+| `--log_interval` | 100000 | Log metrics every N timesteps |
+| `--opponent` | — | Path to frozen opponent `.zip` (for `Foosball-vs-v0`) |
+| `--ghost_level_steps` | 0 | Ghost curriculum: increase level every N env steps (0 = stay at min level) |
+| `--ghost_min_level` | 0 | Ghost curriculum: starting level (0-6) |
+| `--video` | false | Record training videos |
+| `--video_length` | 200 | Length of recorded video in steps |
+| `--video_interval` | 2000 | Steps between video recordings |
+
+**Examples:**
+
+```bash
+# Basic single-player training
+python train.py --task Foosball-1player-v0 --num_envs 1024 --max_iterations 10000
+
+# Train against frozen opponent
+python train.py --task Foosball-vs-v0 --opponent logs/sb3/Foosball-1player-v0/.../model.zip
+
+# Train with ghost curriculum, starting at level 2, advancing every 200k env steps
+python train.py --task Foosball-vsghost-v0 --ghost_min_level 2 --ghost_level_steps 200000
+```
+
+Logs and checkpoints are saved to `logs/sb3/<task_name>/`. Monitor with TensorBoard:
+
+```bash
+tensorboard --logdir logs/sb3/
+```
+
+Key metrics: `rollout/ep_rew_mean`, `goal_scored_pct`, `opponent_goal_scored_pct` (vs/ghost modes), `ghost_level` (ghost mode).
+
+## play.py
+
+```bash
+python IsaacLab/scripts/reinforcement_learning/sb3/play.py --task <TASK_ID> [OPTIONS]
+```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--task` | required | Environment task ID |
+| `--checkpoint` | latest | Path to model `.zip`. If omitted, uses the latest checkpoint from the log directory. |
+| `--num_envs` | from config | Number of parallel environments |
+| `--opponent` | — | Path to frozen opponent `.zip` (for `Foosball-vs-v0`) |
+| `--ghost_level` | 0 | Ghost difficulty level 0-6 (for `Foosball-ghostdemo-v0`) |
+| `--real-time` | false | Run at real-time speed |
+| `--seed` | from config | Random seed |
+| `--video` | false | Record video |
+| `--video_length` | 200 | Length of recorded video in steps |
+| `--use_last_checkpoint` | false | Use the last saved model instead of the best |
+
+**Examples:**
+
+```bash
+# Watch trained agent vs static opponent
+python play.py --task Foosball-1player-v0 --checkpoint logs/sb3/.../model.zip --real-time
+
+# Watch agent vs frozen opponent
+python play.py --task Foosball-vs-v0 --checkpoint model.zip --opponent opponent_model.zip
+
+# Demo ghost level 5
+python play.py --task Foosball-ghostdemo-v0 --ghost_level 5 --checkpoint model.zip --real-time
+```
 
 ## Ghost Opponent
 
 The ghost opponent is a hardcoded, non-AI controller for the black team with 7 difficulty levels (0-6). It provides a curriculum of increasing challenge for training the RL agent without requiring a pre-trained model checkpoint.
-
-### Tasks
-
-| Task | Purpose |
-|------|---------|
-| `Foosball-vsghost-v0` | Training against ghost with automatic curriculum |
-| `Foosball-ghostdemo-v0` | Demo/play a specific ghost level (no training) |
 
 ### Ghost Levels
 
@@ -25,31 +116,6 @@ The ghost opponent is a hardcoded, non-AI controller for the black team with 7 d
 | 5 | Same as level 4, plus wind-up-then-strike kick when ball approaches a rod from the front |
 | 6 | Predictive tracking (leads ball based on velocity) + coordinated play (defense blocks, offense aims kicks at goal center) |
 
-### Training with Curriculum
-
-```bash
-python IsaacLab/scripts/reinforcement_learning/sb3/train.py \
-    --task Foosball-vsghost-v0 \
-    --ghost_min_level 0 \
-    --ghost_level_steps 100000
-```
-
-- `--ghost_min_level N` — Start at level N (skip easier levels)
-- `--ghost_level_steps N` — Increase level every N env steps. Set to 0 to stay at min_level.
-
-The current ghost level is logged to tensorboard as `ghost_level`. Opponent goals are tracked as `opponent_goal_scored_pct`.
-
-### Demo Mode
-
-```bash
-python IsaacLab/scripts/reinforcement_learning/sb3/play.py \
-    --task Foosball-ghostdemo-v0 \
-    --ghost_level 4 \
-    --checkpoint /path/to/model.zip
-```
-
-- `--ghost_level N` — Which level to demo (0-6)
-
 ### Tuning
 
 Ghost behavior is controlled by constants in `IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/foosball2/ghost_opponent.py`:
@@ -61,3 +127,16 @@ Ghost behavior is controlled by constants in `IsaacLab/source/isaaclab_tasks/isa
 - `SLOW_TRACKING_EFFORT / FAST_TRACKING_EFFORT` — Effort clamps for levels 4-5 vs 6
 - `KICK_WINDUP_STEPS / KICK_STRIKE_STEPS` — Timing for kick wind-up and strike phases
 - `TIMER_MIN / TIMER_MAX` — Range of physics steps a rod holds its up/down state (levels 1-2)
+
+## Project Structure
+
+The IsaacLab framework is vendored in `IsaacLab/`. Only the following files are project-owned:
+
+- `IsaacLab/scripts/reinforcement_learning/sb3/train.py` — Training script
+- `IsaacLab/scripts/reinforcement_learning/sb3/play.py` — Inference/playback script
+- `IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/foosball2/` — Environment definition
+  - `foosball_env.py` — `FoosballEnv` class and all env configs
+  - `ghost_opponent.py` — Ghost opponent logic
+  - `__init__.py` — Gym registrations
+  - `agents/sb3_ppo_cfg.yaml` — PPO hyperparameters
+- `IsaacLab/source/isaaclab_assets/isaaclab_assets/robots/foosball.py` — Articulation configs (`FOOSBALL_CFG`, `FOOSBALL_VS_CFG`)
