@@ -397,9 +397,11 @@ class FoosballEnv(DirectRLEnv):
         return observations
 
     def _get_rewards(self) -> torch.Tensor:
+        # Sanitize ball position for reward computation (NaN envs will be reset next step)
+        safe_object_pos = torch.nan_to_num(self.object_pos, nan=0.0, posinf=0.0, neginf=0.0)
 
         base_reward = compute_rewards(
-            self.object_pos,)
+            safe_object_pos,)
         total_reward = base_reward
 
         if self.cfg.revolute_action_penalty:
@@ -408,7 +410,7 @@ class FoosballEnv(DirectRLEnv):
 
         # Penalize when opponent scores (ball in white's goal)
         if self.opponent_model is not None or self.ghost_opponent is not None:
-            opponent_scored = black_goal(self.object_pos)
+            opponent_scored = black_goal(safe_object_pos)
             total_reward[opponent_scored] -= 10.0
 
         return total_reward
@@ -438,20 +440,26 @@ class FoosballEnv(DirectRLEnv):
         self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
         self.object_velocities = self.object.data.root_vel_w
         time_out = self.episode_length_buf >= self.max_episode_length #- 1
+
+        # Force-terminate envs with NaN/Inf state (physics explosion)
+        nan_ball = torch.isnan(self.object_pos).any(dim=-1) | torch.isinf(self.object_pos).any(dim=-1)
+        nan_joints = torch.isnan(self.joint_pos).any(dim=-1) | torch.isinf(self.joint_pos).any(dim=-1)
+        nan_detected = nan_ball | nan_joints
+
         #ball off table score/fall
         off_table_height=0.5
         fell_off_table = self.object_pos[:,2]<=off_table_height
         ball_pop_height = 1
         ball_too_high = self.object_pos[:,2]>=ball_pop_height
 
-        
+
         #print(f"Time Out: {time_out}")
         #print(f"off table: {out_of_bounds}")
 
         white_scored = white_goal(self.object_pos)
         black_scored = black_goal(self.object_pos)
 
-        out_of_bounds = white_scored | black_scored | fell_off_table | ball_too_high
+        out_of_bounds = white_scored | black_scored | fell_off_table | ball_too_high | nan_detected
         self.goal_scored = white_scored.float()
         self.black_goal_scored = black_scored.float()
 
@@ -508,6 +516,10 @@ class FoosballEnv(DirectRLEnv):
         self.robot.write_root_pose_to_sim(default_root_state[:, :7], env_ids)
         self.robot.write_root_velocity_to_sim(default_root_state[:, 7:], env_ids)
         self.robot.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
+
+        # Refresh ball state so observations/ghost don't see stale pre-reset values
+        self.object_pos[env_ids] = object_default_state[:, :3] - self.scene.env_origins[env_ids]
+        self.object_velocities[env_ids] = object_default_state[:, 7:]
 
         ##set black in up position
         #black_pos_up = 2*torch.ones(joint_pos.shape[0],len(self.black_revolute_dof_indices), device=self.device)
