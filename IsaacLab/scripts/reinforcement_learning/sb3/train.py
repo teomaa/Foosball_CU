@@ -33,7 +33,7 @@ parser.add_argument("--checkpoint", type=str, default=None, help="Continue the t
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--save_freq", type=int, default=10000, help="Save a checkpoint every N steps.")
 parser.add_argument("--opponent", type=str, default=None, help="Path to frozen opponent SB3 PPO checkpoint (.zip)")
-parser.add_argument("--ghost_level_steps", type=int, default=0, help="Ghost curriculum: increase level every N env steps (0=no auto-increase)")
+parser.add_argument("--ghost_level_steps", type=str, default="0", help="Ghost curriculum: single int for uniform spacing (e.g. 100000), or comma-separated list of absolute step thresholds (e.g. 100000,300000,600000). 0=no auto-increase.")
 parser.add_argument("--ghost_min_level", type=int, default=0, help="Ghost curriculum: starting level (0-6)")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument(
@@ -137,7 +137,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # ghost opponent curriculum settings
     if hasattr(env_cfg, "ghost_level_steps"):
-        env_cfg.ghost_level_steps = args_cli.ghost_level_steps
+        val = args_cli.ghost_level_steps
+        if "," in val:
+            env_cfg.ghost_level_steps = [int(x) for x in val.split(",")]
+        else:
+            env_cfg.ghost_level_steps = int(val)
     if hasattr(env_cfg, "ghost_min_level"):
         env_cfg.ghost_min_level = args_cli.ghost_min_level
 

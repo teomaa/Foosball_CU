@@ -92,7 +92,7 @@ class FoosballGhostEnvCfg(FoosballEnvCfg):
     """Config for training against a ghost opponent with curriculum."""
     robot_cfg: ArticulationCfg = FOOSBALL_VS_CFG.replace(prim_path="/World/envs/env_.*/Foosball")
     ghost_min_level: int = 0
-    ghost_level_steps: int = 0  # 0 = no auto-increase
+    ghost_level_steps: int | list[int] = 0  # 0 = no auto-increase; int = uniform spacing; list = absolute step thresholds per level transition
 
 
 @configclass
@@ -230,6 +230,13 @@ class FoosballEnv(DirectRLEnv):
             self.ghost_opponent = GhostOpponent(self.scene.num_envs, self.device)
             self._ghost_current_level = self.cfg.ghost_min_level
             self.ghost_opponent.set_level(self._ghost_current_level)
+            # Validate list length matches remaining levels
+            if isinstance(self.cfg.ghost_level_steps, list):
+                expected = 6 - self.cfg.ghost_min_level
+                assert len(self.cfg.ghost_level_steps) == expected, (
+                    f"ghost_level_steps list has {len(self.cfg.ghost_level_steps)} values, "
+                    f"expected {expected} (levels {self.cfg.ghost_min_level+1}..6)"
+                )
             print(f"[INFO] Ghost opponent active (curriculum, start level {self._ghost_current_level}, "
                   f"level_steps={self.cfg.ghost_level_steps})")
 
@@ -409,15 +416,24 @@ class FoosballEnv(DirectRLEnv):
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         # --- Ghost curriculum level progression ---
         if self.ghost_opponent is not None and isinstance(self.cfg, FoosballGhostEnvCfg):
-            if self.cfg.ghost_level_steps > 0:
+            if isinstance(self.cfg.ghost_level_steps, list):
+                # List of absolute step thresholds for each level transition
+                transitions_passed = sum(
+                    1 for t in self.cfg.ghost_level_steps if self.common_step_counter >= t
+                )
+                desired_level = min(6, self.cfg.ghost_min_level + transitions_passed)
+            elif self.cfg.ghost_level_steps > 0:
                 desired_level = min(
                     6,
                     self.cfg.ghost_min_level + self.common_step_counter // self.cfg.ghost_level_steps
                 )
-                if desired_level != self._ghost_current_level:
-                    self._ghost_current_level = desired_level
-                    self.ghost_opponent.set_level(desired_level)
-                    print(f"[INFO] Ghost level -> {desired_level} at step {self.common_step_counter}")
+            else:
+                desired_level = self._ghost_current_level
+
+            if desired_level != self._ghost_current_level:
+                self._ghost_current_level = desired_level
+                self.ghost_opponent.set_level(desired_level)
+                print(f"[INFO] Ghost level -> {desired_level} at step {self.common_step_counter}")
 
         self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
         self.object_velocities = self.object.data.root_vel_w

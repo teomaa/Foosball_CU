@@ -10,8 +10,8 @@ import torch
 # ---------------------------------------------------------------------------
 
 # X positions of the 4 black rods (Keeper, Defense, Mid, Offense)
-# Positive X = black goal side, negative X = white goal side
-ROD_X = torch.tensor([0.50, 0.30, 0.10, -0.15])
+# From USD: black rods are on the negative X side (white goal at X<-0.62)
+ROD_X = torch.tensor([-0.522, -0.373, -0.075, 0.224])
 
 # Y offsets of player figures on each rod relative to prismatic=0
 # Keeper: 1 figure, Defense: 2, Mid: 5, Offense: 3
@@ -33,18 +33,18 @@ SLOW_TRACKING_EFFORT = 15.0   # levels 4-5
 FAST_TRACKING_EFFORT = 40.0   # level 6
 
 # Kick parameters
-KICK_WINDUP_ANGLE = -math.pi / 2
-KICK_STRIKE_EFFORT = 5.0       # matches revolute effort_limit in FOOSBALL_VS_CFG
-KICK_WINDUP_STEPS = 8          # physics steps to hold wind-up
-KICK_STRIKE_STEPS = 4          # physics steps for strike
+KICK_WINDUP_ANGLE = math.pi / 2   # pull figures BACK (away from approaching ball)
+KICK_STRIKE_EFFORT = -8.0         # swing figures FORWARD through the ball
+KICK_STRIKE_STEPS = 10         # physics steps for strike follow-through
+KICK_COCK_DIST = 0.45          # X distance: start cocking back when ball this far away
+KICK_STRIKE_DIST = 0.15        # X distance: strike when ball this close
 
 # Rod up/down timer range (physics steps)
 TIMER_MIN = 30
 TIMER_MAX = 60
 
 # Ball approach detection
-KICK_TRIGGER_DIST = 0.08      # X distance from rod to trigger kick
-KICK_TRIGGER_VEL = -0.1       # ball vx threshold (must be moving toward white goal)
+KICK_TRIGGER_VEL = 0.1        # ball |vx| threshold for approach detection
 
 # Field bounds
 FIELD_Y_MAX = 0.085
@@ -241,84 +241,99 @@ class GhostOpponent:
     ) -> torch.Tensor:
         """Kick state machine for all 4 rods. Returns revolute efforts [num_envs, 4].
 
+        Phases: 0=idle (rod down), 1=cocked (rod pulled back, waiting), 2=strike (swinging forward).
+
+        The rod cocks back in anticipation when the ball approaches from distance,
+        holds the cocked position, then strikes when the ball is close.
+
         Args:
-            aimed: if True (level 6), defense only kicks when ball very close,
-                   offense/mid kick more aggressively.
+            aimed: if True (level 6), defense/keeper use tighter strike distance,
+                   offense/mid use wider cock distance.
         """
         rev_effort = torch.zeros_like(rev_pos)
 
         for rod_idx in range(4):
             rod_x = self.rod_x[rod_idx]
 
-            # Kick trigger: ball near rod and moving toward white goal (vx < threshold)
-            dx = torch.abs(ball_pos[:, 0] - rod_x)
-            trigger_dist = KICK_TRIGGER_DIST
-            if aimed:
-                # Defense/Keeper (rods 0,1): only kick when ball very close
-                # Offense/Mid (rods 2,3): wider trigger
-                trigger_dist = 0.04 if rod_idx <= 1 else 0.10
+            # Ball is "in front" when it's on the positive-X side of the rod
+            # (between the rod and the black goal / center of field).
+            # Ball approaches black rods by moving in the -X direction.
+            ball_dx = ball_pos[:, 0] - rod_x
+            ball_in_front = ball_dx > 0  # ball is on the +X side (field center / black goal side)
+            abs_dx = ball_dx.abs()
 
-            ball_approaching = (ball_vel[:, 0] < KICK_TRIGGER_VEL) & (dx < trigger_dist)
+            ball_moving_toward = ball_vel[:, 0] < -KICK_TRIGGER_VEL  # moving in -X toward the rod
+
+            # Cock/strike distances (wider for level 6 offense/mid)
+            cock_dist = KICK_COCK_DIST
+            strike_dist = KICK_STRIKE_DIST
+            if aimed:
+                if rod_idx <= 1:  # Keeper/Defense: tighter
+                    cock_dist = 0.35
+                    strike_dist = 0.10
+                else:  # Mid/Offense: wider, more aggressive
+                    cock_dist = 0.50
+                    strike_dist = 0.18
 
             idle = self.kick_phase[:, rod_idx] == 0
-            windup = self.kick_phase[:, rod_idx] == 1
+            cocked = self.kick_phase[:, rod_idx] == 1
             strike = self.kick_phase[:, rod_idx] == 2
 
-            # idle -> wind-up on trigger
-            trigger = idle & ball_approaching
+            # --- idle -> cocked: ball approaching from front within cock_dist ---
+            should_cock = idle & ball_in_front & ball_moving_toward & (abs_dx < cock_dist)
             self.kick_phase[:, rod_idx] = torch.where(
-                trigger, torch.ones_like(self.kick_phase[:, rod_idx]), self.kick_phase[:, rod_idx]
+                should_cock, torch.ones_like(self.kick_phase[:, rod_idx]),
+                self.kick_phase[:, rod_idx]
+            )
+
+            # --- cocked -> strike: ball gets within strike_dist ---
+            cocked = self.kick_phase[:, rod_idx] == 1
+            should_strike = cocked & (abs_dx < strike_dist)
+            # Also strike if ball passed the rod or moved away (don't stay cocked forever)
+            ball_passed = cocked & (~ball_in_front)
+            ball_retreated = cocked & (abs_dx > cock_dist + 0.05)
+            should_strike = should_strike | ball_passed
+            should_return = ball_retreated  # ball moved far away, just return to idle
+
+            self.kick_phase[:, rod_idx] = torch.where(
+                should_strike, 2 * torch.ones_like(self.kick_phase[:, rod_idx]),
+                self.kick_phase[:, rod_idx]
             )
             self.kick_timer[:, rod_idx] = torch.where(
-                trigger,
-                torch.full_like(self.kick_timer[:, rod_idx], KICK_WINDUP_STEPS),
-                self.kick_timer[:, rod_idx],
-            )
-
-            # Refresh masks after transitions
-            windup = self.kick_phase[:, rod_idx] == 1
-
-            # wind-up effort: drive toward KICK_WINDUP_ANGLE
-            windup_effort = REVOLUTE_KP * (KICK_WINDUP_ANGLE - rev_pos[:, rod_idx]) \
-                - REVOLUTE_KD * rev_vel[:, rod_idx]
-
-            # wind-up timer
-            self.kick_timer[:, rod_idx] -= windup.long()
-            to_strike = windup & (self.kick_timer[:, rod_idx] <= 0)
-            self.kick_phase[:, rod_idx] = torch.where(
-                to_strike,
-                2 * torch.ones_like(self.kick_phase[:, rod_idx]),
-                self.kick_phase[:, rod_idx],
-            )
-            self.kick_timer[:, rod_idx] = torch.where(
-                to_strike,
+                should_strike,
                 torch.full_like(self.kick_timer[:, rod_idx], KICK_STRIKE_STEPS),
                 self.kick_timer[:, rod_idx],
             )
-
-            # Refresh
-            strike = self.kick_phase[:, rod_idx] == 2
-
-            # strike effort: max positive torque
-            strike_effort = KICK_STRIKE_EFFORT * torch.ones_like(rev_pos[:, rod_idx])
-
-            # strike timer
-            self.kick_timer[:, rod_idx] -= strike.long()
-            to_idle = strike & (self.kick_timer[:, rod_idx] <= 0)
+            # Cocked -> idle if ball retreated far away
             self.kick_phase[:, rod_idx] = torch.where(
-                to_idle, torch.zeros_like(self.kick_phase[:, rod_idx]), self.kick_phase[:, rod_idx]
+                should_return & (~should_strike),
+                torch.zeros_like(self.kick_phase[:, rod_idx]),
+                self.kick_phase[:, rod_idx],
             )
 
-            # Refresh
-            idle = self.kick_phase[:, rod_idx] == 0
+            # --- strike -> idle: timer expires ---
+            strike = self.kick_phase[:, rod_idx] == 2
+            self.kick_timer[:, rod_idx] -= strike.long()
+            strike_done = strike & (self.kick_timer[:, rod_idx] <= 0)
+            self.kick_phase[:, rod_idx] = torch.where(
+                strike_done, torch.zeros_like(self.kick_phase[:, rod_idx]),
+                self.kick_phase[:, rod_idx],
+            )
 
-            # idle effort: hold rods down
+            # --- Compute efforts per phase ---
+            idle = self.kick_phase[:, rod_idx] == 0
+            cocked = self.kick_phase[:, rod_idx] == 1
+            strike = self.kick_phase[:, rod_idx] == 2
+
             idle_effort = REVOLUTE_KP * (0.0 - rev_pos[:, rod_idx]) \
                 - REVOLUTE_KD * rev_vel[:, rod_idx]
+            cocked_effort = REVOLUTE_KP * (KICK_WINDUP_ANGLE - rev_pos[:, rod_idx]) \
+                - REVOLUTE_KD * rev_vel[:, rod_idx]
+            strike_effort = KICK_STRIKE_EFFORT * torch.ones_like(rev_pos[:, rod_idx])
 
             rev_effort[:, rod_idx] = (
                 idle_effort * idle.float()
-                + windup_effort * windup.float()
+                + cocked_effort * cocked.float()
                 + strike_effort * strike.float()
             )
 

@@ -31,21 +31,21 @@ All environments share the same core: white team (agent) controls 4 rods (Keeper
 python IsaacLab/scripts/reinforcement_learning/sb3/train.py --task <TASK_ID> [OPTIONS]
 ```
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--task` | required | Environment task ID (see table above) |
-| `--num_envs` | 1024 | Number of parallel environments |
-| `--max_iterations` | from config | Total RL training iterations |
-| `--checkpoint` | — | Resume training from a saved `.zip` checkpoint |
-| `--save_freq` | 10000 | Save a checkpoint every N agent steps |
-| `--seed` | from config | Random seed |
-| `--log_interval` | 100000 | Log metrics every N timesteps |
-| `--opponent` | — | Path to frozen opponent `.zip` (for `Foosball-vs-v0`) |
-| `--ghost_level_steps` | 0 | Ghost curriculum: increase level every N env steps (0 = stay at min level) |
-| `--ghost_min_level` | 0 | Ghost curriculum: starting level (0-6) |
-| `--video` | false | Record training videos |
-| `--video_length` | 200 | Length of recorded video in steps |
-| `--video_interval` | 2000 | Steps between video recordings |
+| Flag | Default | Description                                                                                                                 |
+|------|---------|-----------------------------------------------------------------------------------------------------------------------------|
+| `--task` | required | Environment task ID (see table above)                                                                                       |
+| `--num_envs` | 1024 | Number of parallel environments                                                                                             |
+| `--max_iterations` | from config | Total RL training iterations                                                                                                |
+| `--checkpoint` | — | Resume training from a saved `.zip` checkpoint                                                                              |
+| `--save_freq` | 10000 | Save a checkpoint every N agent steps                                                                                       |
+| `--seed` | from config | Random seed                                                                                                                 |
+| `--log_interval` | 100000 | Log metrics every N timesteps                                                                                               |
+| `--opponent` | — | Path to frozen opponent `.zip` (for `Foosball-vs-v0`)                                                                       |
+| `--ghost_level_steps` | 0 | Ghost curriculum: increase level every N env steps (0 = stay at min level). Can also set to an array (ie 100000,200000,...) |
+| `--ghost_min_level` | 0 | Ghost curriculum: starting level (0-6)                                                                                      |
+| `--video` | false | Record training videos                                                                                                      |
+| `--video_length` | 200 | Length of recorded video in steps                                                                                           |
+| `--video_interval` | 2000 | Steps between video recordings                                                                                              |
 
 **Examples:**
 

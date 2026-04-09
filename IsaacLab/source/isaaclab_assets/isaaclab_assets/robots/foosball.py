@@ -137,10 +137,10 @@ FOOSBALL_VS_CFG = ArticulationCfg(
         ),
         "white_revolute_joints": ImplicitActuatorCfg(
             joint_names_expr=["Keeper_W_RevoluteJoint","Defense_W_RevoluteJoint","Mid_W_RevoluteJoint","Offense_W_RevoluteJoint"],
-            velocity_limit_sim=1.0,
-            effort_limit=5,
+            velocity_limit_sim=5.0,
+            effort_limit=8,
             stiffness=10.0,
-            damping=50.0,
+            damping=2.0,
         ),
         "black_prismatic_joints": ImplicitActuatorCfg(
             joint_names_expr=["Keeper_B_PrismaticJoint","Defense_B_PrismaticJoint","Mid_B_PrismaticJoint","Offense_B_PrismaticJoint"],
@@ -151,10 +151,10 @@ FOOSBALL_VS_CFG = ArticulationCfg(
         ),
         "black_revolute_joints": ImplicitActuatorCfg(
             joint_names_expr=["Keeper_B_RevoluteJoint","Defense_B_RevoluteJoint","Mid_B_RevoluteJoint","Offense_B_RevoluteJoint"],
-            velocity_limit_sim=1.0,
-            effort_limit=5,
+            velocity_limit_sim=5.0,
+            effort_limit=8,
             stiffness=10.0,
-            damping=50.0,
+            damping=2.0,
         ),
     },
 )
