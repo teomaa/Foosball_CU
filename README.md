@@ -58,6 +58,10 @@ python train.py --task Foosball-vs-v0 --opponent logs/sb3/Foosball-1player-v0/..
 
 # Train with ghost curriculum, starting at level 2, advancing every 200k env steps
 python train.py --task Foosball-vsghost-v0 --ghost_min_level 2 --ghost_level_steps 200000
+
+# Comprehensive training task
+conda activate env_isaaclab && cd Projects/foosball/teo/Foosball_CU/
+python IsaacLab/scripts/reinforcement_learning/sb3/train.py --task=Foosball-vsghost-v0 --ghost_level_steps 100000,400000,1000000,1700000,2300000,3000000 --headless --video --video_interval 10000 --video_length 500 --max_iterations 10000
 ```
 
 Logs and checkpoints are saved to `logs/sb3/<task_name>/`. Monitor with TensorBoard:

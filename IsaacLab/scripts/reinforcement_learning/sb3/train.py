@@ -86,11 +86,29 @@ import logging
 import numpy as np
 import os
 import random
+import torch
 from datetime import datetime
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, LogEveryNTimesteps
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, LogEveryNTimesteps
 from stable_baselines3.common.vec_env import VecNormalize
+
+
+class ClampLogStdCallback(BaseCallback):
+    """Clamp the policy's log_std parameter after every training update to prevent
+    standard deviation explosion (and eventual NaN) during long training runs."""
+
+    def __init__(self, min_log_std: float = -5.0, max_log_std: float = 2.0, verbose: int = 0):
+        super().__init__(verbose)
+        self.min_log_std = min_log_std
+        self.max_log_std = max_log_std
+
+    def _on_step(self) -> bool:
+        with torch.no_grad():
+            log_std = self.model.policy.log_std
+            clamped = torch.clamp(log_std, self.min_log_std, self.max_log_std)
+            log_std.copy_(clamped)
+        return True
 
 from isaaclab.envs import (
     DirectMARLEnv,
@@ -219,7 +237,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # callbacks for agent
     num_envs = env.unwrapped.num_envs
     checkpoint_callback = CheckpointCallback(save_freq=args_cli.save_freq, save_path=log_dir, name_prefix="model", verbose=2)
-    callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval * num_envs)]
+    clamp_std_callback = ClampLogStdCallback(min_log_std=-5.0, max_log_std=2.0)
+    callbacks = [checkpoint_callback, clamp_std_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval * num_envs)]
 
     if args_cli.video:
         video_callback = IsaacLabVideoCallback(
