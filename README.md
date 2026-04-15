@@ -61,7 +61,14 @@ python train.py --task Foosball-vsghost-v0 --ghost_min_level 2 --ghost_level_ste
 
 # Comprehensive training task
 conda activate env_isaaclab && cd Projects/foosball/teo/Foosball_CU/
-python IsaacLab/scripts/reinforcement_learning/sb3/train.py --task=Foosball-vsghost-v0 --ghost_level_steps 100000,400000,1000000,1700000,2300000,3000000 --headless --video --video_interval 10000 --video_length 500 --max_iterations 10000
+python IsaacLab/scripts/reinforcement_learning/sb3/train.py --task=Foosball-vsghost-v0 --ghost_level_steps 100000,400000,1200000,2400000,3200000,4200000 --headless --video --video_interval 10000 --video_length 500 --max_iterations 35000
+
+# Resume after task
+python IsaacLab/scripts/reinforcement_learning/sb3/train.py --task=Foosball-vsghost-v0 --checkpoint logs/sb3/Foosball-vsghost-v0/2026-04-13_11-56-41/model_2621440000_steps.zip --ghost_min_level 5 --ghost_level_steps 2200000 --headless --video --video_interval 50000 --video_length 500 --max_iterations 20000
+
+# Play ghost
+python IsaacLab/scripts/reinforcement_learning/sb3/play.py --task Foosball-ghostdemo-v0 --ghost_level 5 --checkpoint "/home/yw3809/Projects/foosball/teo/Foosball_CU/logs/sb3/Foosball-vsghost-v0/2026-04-13_11-56-41/model_2621440000_steps.zip"
+
 ```
 
 Logs and checkpoints are saved to `logs/sb3/<task_name>/`. Monitor with TensorBoard:
