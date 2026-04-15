@@ -61,3 +61,38 @@ gym.register(
     },
 )
 
+# -----------------------------------------------------------------------------
+# Vision-based variants (overhead-camera RGB + asymmetric privileged-state critic).
+# Use skrl PPO; require the --enable_cameras flag at launch time.
+# -----------------------------------------------------------------------------
+
+gym.register(
+    id="Foosball-1player-vision-v0",
+    entry_point=f"{__name__}.foosball_env:FoosballVisionEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.foosball_env:FoosballVisionEnvCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_camera_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Foosball-vs-vision-v0",
+    entry_point=f"{__name__}.foosball_env:FoosballVisionEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.foosball_env:FoosballVsVisionEnvCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_camera_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Foosball-vsghost-vision-v0",
+    entry_point=f"{__name__}.foosball_env:FoosballVisionEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.foosball_env:FoosballGhostVisionEnvCfg",
+        "skrl_cfg_entry_point": f"{agents.__name__}:skrl_camera_ppo_cfg.yaml",
+    },
+)
+

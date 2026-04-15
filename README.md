@@ -22,8 +22,24 @@ python IsaacLab/scripts/reinforcement_learning/sb3/play.py --task Foosball-1play
 | `Foosball-vs-v0` | Play against a frozen PPO model loaded from a checkpoint. Requires `--opponent`. |
 | `Foosball-vsghost-v0` | Train against a hardcoded ghost opponent with curriculum levels 0-6. |
 | `Foosball-ghostdemo-v0` | Demo a specific ghost level (1 env, play-only). Requires `--ghost_level`. |
+| `Foosball-1player-vision-v0` | Vision mode, single player. Actor sees overhead RGB; critic sees state. |
+| `Foosball-vs-vision-v0` | Vision mode, vs frozen opponent. |
+| `Foosball-vsghost-vision-v0` | Vision mode, vs ghost curriculum. |
 
 All environments share the same core: white team (agent) controls 4 rods (Keeper, Defense, Mid, Offense) with 8 actions (4 prismatic slide + 4 revolute spin). Observation is 41-dim: joint positions (16) + joint velocities (16) + ball position (3) + ball velocity (6).
+
+## Vision mode (train from video)
+
+Vision-mode tasks (`*-vision-v0`) feed the policy a stack of three 128×128 overhead RGB frames instead of the 41-dim state vector. The critic still sees the privileged state (asymmetric actor-critic), so value learning stays sample-efficient. They are trained with **skrl PPO**, not SB3, and require Isaac Sim's RTX renderer:
+
+```bash
+python IsaacLab/scripts/reinforcement_learning/skrl/train.py \
+    --task Foosball-1player-vision-v0 --num_envs 256 --headless --enable_cameras
+```
+
+- `--enable_cameras` is required (TiledCamera needs the RTX renderer).
+- `--num_envs 256` is the recommended ceiling; 1024 will likely OOM on a single GPU at 128×128 with frame-stack 3.
+- Architecture: Nature-style CNN encoder (32→64→64 conv) + 512-FC actor head; 256×256 MLP critic on the state.
 
 ## train.py
 

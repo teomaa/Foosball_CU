@@ -16,6 +16,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, ArticulationCfg,RigidObjectCfg,RigidObject
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCamera, TiledCameraCfg
 from isaaclab.sim import SimulationCfg,PhysxCfg
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils import configclass
@@ -101,6 +102,81 @@ class FoosballGhostDemoEnvCfg(FoosballEnvCfg):
     robot_cfg: ArticulationCfg = FOOSBALL_VS_CFG.replace(prim_path="/World/envs/env_.*/Foosball")
     ghost_level: int = 0
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1, env_spacing=2.0, replicate_physics=True)
+
+
+# -----------------------------------------------------------------------------
+# Vision-based variants: overhead-camera RGB observations for the actor,
+# privileged 41-dim state for the critic (asymmetric actor-critic).
+# -----------------------------------------------------------------------------
+
+VISION_IMAGE_HEIGHT = 128
+VISION_IMAGE_WIDTH = 128
+VISION_FRAME_STACK = 3
+VISION_NUM_ENVS = 256
+
+
+def _make_overhead_camera_cfg(width: int = VISION_IMAGE_WIDTH, height: int = VISION_IMAGE_HEIGHT) -> TiledCameraCfg:
+    """Overhead camera looking straight down at the table center, one per env."""
+    return TiledCameraCfg(
+        prim_path="/World/envs/env_.*/OverheadCam",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.0, 0.0, 1.5),
+            rot=(1.0, 0.0, 0.0, 0.0),
+            convention="world",  # camera looks along -Z in world frame
+        ),
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=12.0,
+            focus_distance=400.0,
+            horizontal_aperture=20.955,
+            clipping_range=(0.05, 5.0),
+        ),
+        width=width,
+        height=height,
+    )
+
+
+@configclass
+class FoosballVisionEnvCfg(FoosballEnvCfg):
+    """1-player vision: pixel actor + privileged state critic."""
+    tiled_camera: TiledCameraCfg = _make_overhead_camera_cfg()
+    image_height: int = VISION_IMAGE_HEIGHT
+    image_width: int = VISION_IMAGE_WIDTH
+    frame_stack: int = VISION_FRAME_STACK
+    # actor sees stacked RGB (HWC, channels = 3 * frame_stack); critic sees the 41-dim state.
+    observation_space = {"policy": [VISION_IMAGE_HEIGHT, VISION_IMAGE_WIDTH, 3 * VISION_FRAME_STACK]}
+    state_space = 41
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
+    )
+
+
+@configclass
+class FoosballVsVisionEnvCfg(FoosballVsEnvCfg):
+    """vs (frozen opponent) vision variant."""
+    tiled_camera: TiledCameraCfg = _make_overhead_camera_cfg()
+    image_height: int = VISION_IMAGE_HEIGHT
+    image_width: int = VISION_IMAGE_WIDTH
+    frame_stack: int = VISION_FRAME_STACK
+    observation_space = {"policy": [VISION_IMAGE_HEIGHT, VISION_IMAGE_WIDTH, 3 * VISION_FRAME_STACK]}
+    state_space = 41
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
+    )
+
+
+@configclass
+class FoosballGhostVisionEnvCfg(FoosballGhostEnvCfg):
+    """vs-ghost (curriculum) vision variant."""
+    tiled_camera: TiledCameraCfg = _make_overhead_camera_cfg()
+    image_height: int = VISION_IMAGE_HEIGHT
+    image_width: int = VISION_IMAGE_WIDTH
+    frame_stack: int = VISION_FRAME_STACK
+    observation_space = {"policy": [VISION_IMAGE_HEIGHT, VISION_IMAGE_WIDTH, 3 * VISION_FRAME_STACK]}
+    state_space = 41
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
+    )
 
 
 class FoosballEnv(DirectRLEnv):
@@ -528,6 +604,83 @@ class FoosballEnv(DirectRLEnv):
 
 
 
+
+
+class FoosballVisionEnv(FoosballEnv):
+    """Foosball with overhead-camera RGB observations + asymmetric privileged-state critic.
+
+    Actor obs: stacked uint8 RGB tensor (N, H, W, 3*frame_stack).
+    Critic state: the same 41-dim vector the base env uses for its policy.
+    """
+    cfg: FoosballVisionEnvCfg
+
+    def __init__(self, cfg, render_mode: str | None = None, **kwargs):
+        super().__init__(cfg, render_mode, **kwargs)
+        H, W, K = self.cfg.image_height, self.cfg.image_width, self.cfg.frame_stack
+        # rolling buffer of last K frames (channels-last, uint8 to keep replay/rollout cheap)
+        self._frame_buf = torch.zeros(
+            (self.scene.num_envs, K, H, W, 3),
+            dtype=torch.uint8,
+            device=self.device,
+        )
+        # per-env flag: True after first frame is captured this episode
+        self._frame_buf_initialized = torch.zeros(
+            self.scene.num_envs, dtype=torch.bool, device=self.device,
+        )
+
+    def _setup_scene(self):
+        super()._setup_scene()
+        self.tiled_camera = TiledCamera(self.cfg.tiled_camera)
+        self.scene.sensors["tiled_camera"] = self.tiled_camera
+
+    def _read_camera_uint8(self) -> torch.Tensor:
+        """Fetch current RGB frame and normalize to (N, H, W, 3) uint8."""
+        rgb = self.tiled_camera.data.output["rgb"]
+        if rgb.dtype == torch.uint8:
+            return rgb
+        # IsaacLab returns float in [0, 1] when render dtype is float.
+        if rgb.is_floating_point():
+            rgb = (rgb.clamp(0.0, 1.0) * 255.0).to(torch.uint8)
+        else:
+            rgb = rgb.clamp(0, 255).to(torch.uint8)
+        return rgb
+
+    def _get_observations(self) -> dict:
+        rgb = self._read_camera_uint8()  # (N, H, W, 3)
+
+        # On freshly-reset envs, fill all K slots with the current frame so the
+        # stack doesn't leak last-episode pixels.
+        not_init = ~self._frame_buf_initialized
+        if not_init.any():
+            idx = torch.nonzero(not_init, as_tuple=False).squeeze(-1)
+            self._frame_buf[idx] = rgb[idx].unsqueeze(1).expand(-1, self.cfg.frame_stack, -1, -1, -1).contiguous()
+            self._frame_buf_initialized[idx] = True
+
+        # Roll oldest -> drop, append newest at the end.
+        self._frame_buf = torch.roll(self._frame_buf, shifts=-1, dims=1)
+        self._frame_buf[:, -1] = rgb
+
+        # (N, K, H, W, 3) -> (N, H, W, K*3) channels-last for the CNN.
+        N, K, H, W, C = self._frame_buf.shape
+        rgb_stack = self._frame_buf.permute(0, 2, 3, 1, 4).reshape(N, H, W, K * C).contiguous()
+
+        return {"policy": rgb_stack}
+
+    def _get_states(self) -> torch.Tensor:
+        """Privileged 41-dim state used by the asymmetric critic."""
+        state = torch.cat(
+            (self.joint_pos, self.joint_vel, self.object_pos, self.object_velocities), dim=-1
+        )
+        state = torch.clamp(state, -20.0, 20.0)
+        state = torch.nan_to_num(state, nan=0.0, posinf=20.0, neginf=-20.0)
+        return state
+
+    def _reset_idx(self, env_ids):
+        super()._reset_idx(env_ids)
+        if env_ids is None:
+            self._frame_buf_initialized[:] = False
+        else:
+            self._frame_buf_initialized[env_ids] = False
 
 
 @torch.jit.script
