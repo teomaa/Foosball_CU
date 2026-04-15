@@ -31,10 +31,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train or test model.')
     parser.add_argument('-t', '--test', help='Test mode', action='store_true')
     parser.add_argument('--protagonist-strategy', default='basic',
-                        choices=['basic', 'advanced'],
+                        choices=['basic', 'advanced', 'advanced_2'],
                         help='Strategy for protagonist (yellow)')
     parser.add_argument('--antagonist-strategy', default='basic',
-                        choices=['basic', 'advanced'],
+                        choices=['basic', 'advanced', 'advanced_2'],
                         help='Strategy for antagonist (black)')
     args = parser.parse_args()
 

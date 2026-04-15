@@ -1,10 +1,12 @@
 from ai_agents.v2.gym.strategies.base_strategy import FoosballStrategy
 from ai_agents.v2.gym.strategies.basic_strategy import BasicStrategy
 from ai_agents.v2.gym.strategies.advanced_strategy import AdvancedStrategy
+from ai_agents.v2.gym.strategies.advanced_2_strategy import Advanced2Strategy
 
 _REGISTRY = {
     "basic": BasicStrategy,
     "advanced": AdvancedStrategy,
+    "advanced_2": Advanced2Strategy,
 }
 
 
@@ -14,7 +16,7 @@ def make_strategy(name: str, env, team: str) -> FoosballStrategy:
     Parameters
     ----------
     name : str
-        One of the registered strategy names (``"basic"``, ``"advanced"``).
+        One of the registered strategy names (``"basic"``, ``"advanced"``, ``"advanced_2"``).
     env : FoosballEnv
         The environment instance.
     team : str
