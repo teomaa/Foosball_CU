@@ -1,5 +1,7 @@
 /logs/
 /outputs/
+.idea/
+crash_*.txt
 
 /IsaacLab/*
 
