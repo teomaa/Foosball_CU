@@ -1,12 +1,13 @@
 seed: 42
 
-# Asymmetric actor-critic for vision-based foosball:
-#   policy (actor) sees stacked overhead RGB frames (HWC, 128 x 128 x 9, uint8)
-#   value (critic) sees the privileged 41-dim state vector
+# Asymmetric actor-critic for vision-based foosball.
 #
-# IsaacLab's skrl wrapper passes the dict observation to the policy under STATES
-# and the privileged state-space tensor to the value model. Set `separate: True`
-# so each model has its own encoder.
+# STATES layout (flat, 147497 dims):
+#   [0 .. 147455]  = stacked RGB image (128*128*9), float32 values 0-255
+#   [147456 .. 147496] = privileged 41-dim state (joint pos/vel, ball pos/vel)
+#
+# The policy CNN slices out the image portion, reshapes to NHWC, permutes to
+# NCHW, and scales to [0, 1].  The value MLP slices out the 41-dim state.
 models:
   separate: True
   policy:  # GaussianMixin: stochastic actor over 8 continuous actions
@@ -18,9 +19,7 @@ models:
     initial_log_std: 0.0
     network:
       - name: features_extractor
-        # Cast uint8 -> float32, scale to [0, 1], then permute NHWC -> NCHW.
-        # (don't permute for JAX; keep this PyTorch-only)
-        input: permute(STATES.float() / 255.0, (0, 3, 1, 2))
+        input: permute(STATES[:, :147456].reshape(-1, 128, 128, 9) / 255.0, (0, 3, 1, 2))
         layers:
           - conv2d: {out_channels: 32, kernel_size: 8, stride: 4, padding: 0}
           - conv2d: {out_channels: 64, kernel_size: 4, stride: 2, padding: 0}
@@ -37,7 +36,7 @@ models:
     clip_actions: False
     network:
       - name: net
-        input: STATES
+        input: STATES[:, 147456:]
         layers: [256, 256]
         activations: elu
     output: ONE
@@ -61,7 +60,7 @@ agent:
   learning_rate_scheduler: KLAdaptiveLR
   learning_rate_scheduler_kwargs:
     kl_threshold: 0.01
-  state_preprocessor: null  # actor sees uint8 pixels; value preproc handles state
+  state_preprocessor: null
   state_preprocessor_kwargs: null
   value_preprocessor: RunningStandardScaler
   value_preprocessor_kwargs: null
@@ -79,7 +78,7 @@ agent:
   experiment:
     directory: "foosball_vision_skrl"
     experiment_name: ""
-    write_interval: auto
+    write_interval: 200
     checkpoint_interval: auto
 
 

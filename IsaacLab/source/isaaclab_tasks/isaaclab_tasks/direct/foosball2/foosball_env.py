@@ -113,6 +113,9 @@ VISION_IMAGE_HEIGHT = 128
 VISION_IMAGE_WIDTH = 128
 VISION_FRAME_STACK = 3
 VISION_NUM_ENVS = 256
+_VISION_IMAGE_FLAT = VISION_IMAGE_HEIGHT * VISION_IMAGE_WIDTH * 3 * VISION_FRAME_STACK  # 147456
+_VISION_STATE_DIM = 41
+_VISION_OBS_TOTAL = _VISION_IMAGE_FLAT + _VISION_STATE_DIM  # 147497
 
 
 def _make_overhead_camera_cfg(width: int = VISION_IMAGE_WIDTH, height: int = VISION_IMAGE_HEIGHT) -> TiledCameraCfg:
@@ -138,14 +141,19 @@ def _make_overhead_camera_cfg(width: int = VISION_IMAGE_WIDTH, height: int = VIS
 
 @configclass
 class FoosballVisionEnvCfg(FoosballEnvCfg):
-    """1-player vision: pixel actor + privileged state critic."""
+    """1-player vision: pixel actor + privileged state critic.
+
+    Observation is a flat vector: [image_flat (147456) | state (41)].
+    The skrl model YAML slices the image part for the policy CNN and the
+    state part for the value MLP, achieving asymmetric actor-critic within
+    skrl's single-agent PPO (which passes the same STATES to both models).
+    """
     tiled_camera: TiledCameraCfg = _make_overhead_camera_cfg()
     image_height: int = VISION_IMAGE_HEIGHT
     image_width: int = VISION_IMAGE_WIDTH
     frame_stack: int = VISION_FRAME_STACK
-    # actor sees stacked RGB (HWC, channels = 3 * frame_stack); critic sees the 41-dim state.
-    observation_space = {"policy": [VISION_IMAGE_HEIGHT, VISION_IMAGE_WIDTH, 3 * VISION_FRAME_STACK]}
-    state_space = 41
+    observation_space = _VISION_OBS_TOTAL
+    state_space = 0
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
     )
@@ -158,8 +166,8 @@ class FoosballVsVisionEnvCfg(FoosballVsEnvCfg):
     image_height: int = VISION_IMAGE_HEIGHT
     image_width: int = VISION_IMAGE_WIDTH
     frame_stack: int = VISION_FRAME_STACK
-    observation_space = {"policy": [VISION_IMAGE_HEIGHT, VISION_IMAGE_WIDTH, 3 * VISION_FRAME_STACK]}
-    state_space = 41
+    observation_space = _VISION_OBS_TOTAL
+    state_space = 0
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
     )
@@ -172,8 +180,8 @@ class FoosballGhostVisionEnvCfg(FoosballGhostEnvCfg):
     image_height: int = VISION_IMAGE_HEIGHT
     image_width: int = VISION_IMAGE_WIDTH
     frame_stack: int = VISION_FRAME_STACK
-    observation_space = {"policy": [VISION_IMAGE_HEIGHT, VISION_IMAGE_WIDTH, 3 * VISION_FRAME_STACK]}
-    state_space = 41
+    observation_space = _VISION_OBS_TOTAL
+    state_space = 0
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
     )
@@ -660,20 +668,19 @@ class FoosballVisionEnv(FoosballEnv):
         self._frame_buf = torch.roll(self._frame_buf, shifts=-1, dims=1)
         self._frame_buf[:, -1] = rgb
 
-        # (N, K, H, W, 3) -> (N, H, W, K*3) channels-last for the CNN.
-        N, K, H, W, C = self._frame_buf.shape
-        rgb_stack = self._frame_buf.permute(0, 2, 3, 1, 4).reshape(N, H, W, K * C).contiguous()
+        # (N, K, H, W, 3) -> (N, H*W*K*3) flat float32.
+        N = self._frame_buf.shape[0]
+        rgb_flat = self._frame_buf.permute(0, 2, 3, 1, 4).reshape(N, -1).float()
 
-        return {"policy": rgb_stack}
-
-    def _get_states(self) -> torch.Tensor:
-        """Privileged 41-dim state used by the asymmetric critic."""
+        # Privileged state for the asymmetric critic (packed into the same obs
+        # vector because skrl single-agent PPO passes one STATES to all models).
         state = torch.cat(
             (self.joint_pos, self.joint_vel, self.object_pos, self.object_velocities), dim=-1
         )
         state = torch.clamp(state, -20.0, 20.0)
         state = torch.nan_to_num(state, nan=0.0, posinf=20.0, neginf=-20.0)
-        return state
+
+        return {"policy": torch.cat([rgb_flat, state], dim=-1)}
 
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
