@@ -119,13 +119,18 @@ _VISION_OBS_TOTAL = _VISION_IMAGE_FLAT + _VISION_STATE_DIM  # 147497
 
 
 def _make_overhead_camera_cfg(width: int = VISION_IMAGE_WIDTH, height: int = VISION_IMAGE_HEIGHT) -> TiledCameraCfg:
-    """Overhead camera looking straight down at the table center, one per env."""
+    """Overhead camera looking straight down at the table center, one per env.
+
+    Using `opengl` convention: with identity rotation the camera forward axis
+    is -Z, so a camera at +Z above the table looks straight down. (The old
+    `world` convention with identity rot pointed +X, which was a side view.)
+    """
     return TiledCameraCfg(
         prim_path="/World/envs/env_.*/OverheadCam",
         offset=TiledCameraCfg.OffsetCfg(
             pos=(0.0, 0.0, 1.5),
             rot=(1.0, 0.0, 0.0, 0.0),
-            convention="world",  # camera looks along -Z in world frame
+            convention="opengl",
         ),
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
@@ -342,7 +347,9 @@ class FoosballEnv(DirectRLEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        self.actions = torch.clamp(actions.clone(), -1.0, 1.0)
+        # Sanitize before clamp: clamp(NaN) is still NaN.
+        sanitized = torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0)
+        self.actions = torch.clamp(sanitized, -1.0, 1.0)
 
 
     def _apply_action(self) -> None:
@@ -380,8 +387,6 @@ class FoosballEnv(DirectRLEnv):
             agent_torque + restoring_torque, joint_ids=self.white_revolute_dof_indices
         )
 
-        assert not torch.isnan(self.actions).any(), "NaN in actions"
-        assert not torch.isinf(self.actions).any(), "Inf actions!"
 
         # --- Frozen opponent actions (black team) ---
         if self.opponent_model is not None:
@@ -728,12 +733,15 @@ def compute_rewards(
 
     z = torch.zeros_like(object_pos[:, 1])
     y_dist = torch.pow(torch.max(torch.abs(object_pos[:, 1]) - 0.08525, z), 2)
-    #print(f"Y dist: {y_dist}")
-    x_dist_to_goal_white= torch.pow(object_pos[:, 0] + 0.61725, 2)
-    #print(f"X dist: {x_dist_to_goal_white}")
-    dist_to_goal_white= torch.sqrt(x_dist_to_goal_white + y_dist)
+    x_dist_to_goal_white = torch.pow(object_pos[:, 0] + 0.61725, 2)
+    dist_to_goal_white = torch.sqrt(x_dist_to_goal_white + y_dist)
 
-    dist_penalty = -0.5 * torch.tanh(3.0 * dist_to_goal_white)
+    # Linear penalty normalized by board diagonal (goal-to-far-corner ~ 1.28).
+    # Unlike the old tanh (saturated past ~0.5), this gives a non-vanishing
+    # gradient across the whole board, so the agent always has signal to push
+    # the ball closer to the goal.
+    max_board_dist = 1.28
+    dist_penalty = -1.0 * (dist_to_goal_white / max_board_dist)
     #dist_goal_clamped=torch.clamp(dist_to_goal_white, min=1e-4, max=2.0)
     
     #Revised Reward

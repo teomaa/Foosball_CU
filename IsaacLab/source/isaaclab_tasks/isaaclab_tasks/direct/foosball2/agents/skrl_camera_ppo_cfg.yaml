@@ -12,7 +12,12 @@ models:
   separate: True
   policy:  # GaussianMixin: stochastic actor over 8 continuous actions
     class: GaussianMixin
-    clip_actions: False
+    # Clip sampled actions to action-space bounds BEFORE they're stored in the
+    # rollout. With clip_actions=False, PPO's log_prob is computed on raw
+    # pre-clamp Gaussian samples, so the policy mean can drift past ±1 "for
+    # free" (env clamps to ±1 anyway) — this is what caused the rod-flip
+    # degenerate behavior in skrl but not in sb3.
+    clip_actions: True
     clip_log_std: True
     min_log_std: -20.0
     max_log_std: 2.0
@@ -36,7 +41,11 @@ models:
     clip_actions: False
     network:
       - name: net
-        input: STATES[:, 147456:]
+        # Divide by 20 (matches env clamp) so state is ~[-1, 1] before the MLP.
+        # Prevents large activations from 41-dim state values that the skrl
+        # state_preprocessor can't normalize (it's null because the 147k image
+        # part can't go through RunningStandardScaler).
+        input: STATES[:, 147456:] / 20.0
         layers: [256, 256]
         activations: elu
     output: ONE
@@ -66,7 +75,7 @@ agent:
   value_preprocessor_kwargs: null
   random_timesteps: 0
   learning_starts: 0
-  grad_norm_clip: 1.0
+  grad_norm_clip: 0.5
   ratio_clip: 0.2
   value_clip: 0.2
   clip_predicted_values: True
@@ -79,7 +88,7 @@ agent:
     directory: "foosball_vision_skrl"
     experiment_name: ""
     write_interval: 200
-    checkpoint_interval: auto
+    checkpoint_interval: 5000  # ~every 5k steps — tighter than 'auto' so a crash after many hours doesn't lose a full run
 
 
 trainer:
