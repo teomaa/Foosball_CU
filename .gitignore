@@ -14,6 +14,11 @@ crash_*.txt
 !/IsaacLab/scripts/reinforcement_learning/sb3/train.py
 !/IsaacLab/scripts/reinforcement_learning/sb3/play.py
 
+!/IsaacLab/scripts/reinforcement_learning/skrl/
+/IsaacLab/scripts/reinforcement_learning/skrl/*
+!/IsaacLab/scripts/reinforcement_learning/skrl/train.py
+!/IsaacLab/scripts/reinforcement_learning/skrl/play.py
+
 /IsaacLab/.gitignore
 
 /IsaacLab/.vscode/*
