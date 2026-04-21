@@ -33,10 +33,12 @@ All environments share the same core: white team (agent) controls 4 rods (Keeper
 Vision-mode tasks (`*-vision-v0`) feed the policy a stack of three 128×128 overhead RGB frames instead of the 41-dim state vector. The critic still sees the privileged state (asymmetric actor-critic), so value learning stays sample-efficient. They are trained with **skrl PPO**, not SB3, and require Isaac Sim's RTX renderer:
 
 ```bash
-python IsaacLab/scripts/reinforcement_learning/skrl/train.py \
+./scripts/clean_isaac_state.sh && \
+  python IsaacLab/scripts/reinforcement_learning/skrl/train.py \
     --task Foosball-1player-vision-v0 --num_envs 256 --headless --enable_cameras
 ```
 
+- **Always prefix training/play commands with `./scripts/clean_isaac_state.sh &&`.** Kit/carb leaks orphan `/dev/shm/carb-*` shared-memory segments on exit (even on a clean `simulation_app.close()`). The next launch then segfaults or freezes the terminal. The cleanup script sweeps orphans whose owning PID is dead — safe to run any time.
 - `--enable_cameras` is required (TiledCamera needs the RTX renderer).
 - `--num_envs 256` is the recommended ceiling; 1024 will likely OOM on a single GPU at 128×128 with frame-stack 3.
 - Architecture: Nature-style CNN encoder (32→64→64 conv) + 512-FC actor head; 256×256 MLP critic on the state.

@@ -37,6 +37,16 @@ class FoosballEnvCfg(DirectRLEnvCfg):
     observation_space = 41
     state_space = 0
     revolute_action_penalty: bool = False  # Penalize revolute actions (0.05 * sum of squares)
+    # Per-step bonus for a "clean kick" event (white rod touches ball + ball accelerates
+    # forward + ball ends step moving forward + rod differs from last toucher). Default
+    # 0 (disabled). Vision variants override to a small positive value to help the pixel
+    # policy discover ball-striking earlier.
+    kick_reward: float = 0.0
+    # Per-step bonus for forward ball motion toward the white goal (-x direction).
+    # Bonus = velocity_reward_scale * clamp(-ball_vx, 0, 2). Only rewards forward
+    # motion (never penalizes backward), and caps the rewardable velocity so a
+    # random reset-velocity spike can't dominate the shaping. Default 0.
+    velocity_reward_scale: float = 0.0
 
     # opponent (frozen model)
     opponent_checkpoint: str | None = None    # Path to SB3 PPO .zip
@@ -159,6 +169,8 @@ class FoosballVisionEnvCfg(FoosballEnvCfg):
     frame_stack: int = VISION_FRAME_STACK
     observation_space = _VISION_OBS_TOTAL
     state_space = 0
+    kick_reward: float = 8.0
+    velocity_reward_scale: float = 0.5
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
     )
@@ -173,6 +185,8 @@ class FoosballVsVisionEnvCfg(FoosballVsEnvCfg):
     frame_stack: int = VISION_FRAME_STACK
     observation_space = _VISION_OBS_TOTAL
     state_space = 0
+    kick_reward: float = 8.0
+    velocity_reward_scale: float = 0.5
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
     )
@@ -187,6 +201,8 @@ class FoosballGhostVisionEnvCfg(FoosballGhostEnvCfg):
     frame_stack: int = VISION_FRAME_STACK
     observation_space = _VISION_OBS_TOTAL
     state_space = 0
+    kick_reward: float = 8.0
+    velocity_reward_scale: float = 0.5
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
         num_envs=VISION_NUM_ENVS, env_spacing=2.0, replicate_physics=True
     )
@@ -258,6 +274,30 @@ class FoosballEnv(DirectRLEnv):
         #Add goal tracker to tensorboard
         self.goal_scored = torch.zeros(self.scene.num_envs, device=self.device, dtype=torch.float32)
         self.black_goal_scored = torch.zeros(self.scene.num_envs, device=self.device, dtype=torch.float32)
+
+        # --- Kick-event reward state & geometry ---
+        # ROD_X in ghost_opponent.py holds the black rod X positions; white is mirrored
+        # across x=0. Figure offsets are symmetric, so same tensor works for both teams.
+        from .ghost_opponent import ROD_X as _BLACK_ROD_X, ROD_FIGURE_OFFSETS
+        self._black_rod_x = _BLACK_ROD_X.to(self.device)            # (4,) [Keeper..Offense]
+        self._white_rod_x = (-_BLACK_ROD_X).to(self.device)         # (4,) mirror: [0.522, 0.373, 0.075, -0.224]
+        # Pad to 5 figures per rod with +inf so min-over-figures ignores unused slots.
+        MAX_FIGS = 5
+        padded = torch.full((4, MAX_FIGS), float("inf"), device=self.device)
+        for r, offs in enumerate(ROD_FIGURE_OFFSETS):
+            padded[r, : len(offs)] = torch.tensor(offs, device=self.device)
+        self._figure_offsets_padded = padded                         # (4, 5)
+        # Contact & kick thresholds.
+        self._kick_rx = 0.03              # X-distance to rod centerline
+        self._kick_ry = 0.03              # Y-distance to nearest figure
+        self._kick_dvx_min = 0.5          # min forward-velocity impulse (m/s)
+        self._kick_vfwd_min = 0.3         # min post-kick forward speed (m/s)
+        self._kick_wall_y = 0.085 - 0.0175  # FIELD_Y_MAX - ball_radius
+        # Per-env running state, reset in _reset_idx.
+        self._prev_ball_vx = torch.zeros(self.scene.num_envs, device=self.device, dtype=torch.float32)
+        self._last_white_touch_rod = torch.full(
+            (self.scene.num_envs,), -1, device=self.device, dtype=torch.int8
+        )
 
         # --- Frozen opponent model ---
         self.opponent_model = None
@@ -493,6 +533,14 @@ class FoosballEnv(DirectRLEnv):
             safe_object_pos,)
         total_reward = base_reward
 
+        # Forward-velocity shaping: reward ball moving toward white goal (-x).
+        # Breaks the "do nothing" local optimum that dense distance shaping alone
+        # can create (advantage ≈ 0 when the ball is motionless).
+        if self.cfg.velocity_reward_scale > 0.0:
+            safe_object_vel = torch.nan_to_num(self.object_velocities, nan=0.0, posinf=0.0, neginf=0.0)
+            vx_toward_goal = (-safe_object_vel[:, 0]).clamp(min=0.0, max=2.0)
+            total_reward = total_reward + self.cfg.velocity_reward_scale * vx_toward_goal
+
         if self.cfg.revolute_action_penalty:
             revolute_actions = self.actions[:, 4:8]
             total_reward = total_reward - 0.05 * torch.sum(revolute_actions**2, dim=-1)
@@ -502,7 +550,88 @@ class FoosballEnv(DirectRLEnv):
             opponent_scored = black_goal(safe_object_pos)
             total_reward[opponent_scored] -= 10.0
 
+        # --- Kick-event reward ---
+        if self.cfg.kick_reward > 0.0:
+            total_reward = total_reward + self._compute_kick_reward()
+
         return total_reward
+
+    def _compute_kick_reward(self) -> torch.Tensor:
+        """Detect forward kicks by white rods and update per-env touch state.
+
+        A kick counts when all of:
+          - a single white rod is in proximity to the ball (per-rod, so two figures
+            on the same rod can't double-count),
+          - the ball's X velocity got more negative by at least _kick_dvx_min
+            (white attacks -X),
+          - the ball is actually moving forward after the step (vx < -_kick_vfwd_min),
+          - the last white rod to touch the ball was a DIFFERENT rod, or was reset
+            by a wall/opponent touch.
+
+        The per-rod "last toucher" is updated on any white-rod contact (not just
+        kick events), which blocks the "sideways jiggle → forward poke with same
+        rod" hack.
+        """
+        # Fetch fresh ball pos/vel (self.object_pos is only refreshed in _get_dones).
+        ball_pos = self.object.data.root_pos_w - self.scene.env_origins  # (N, 3)
+        ball_vel = self.object.data.root_vel_w                            # (N, 6)
+        ball_x = ball_pos[:, 0]
+        ball_y = ball_pos[:, 1]
+        ball_vx = ball_vel[:, 0]
+
+        # White/black prismatic Y positions per rod. Order is [Keeper, Defense, Mid,
+        # Offense] — matches ROD_X / ROD_FIGURE_OFFSETS (same convention used by
+        # ghost_opponent.py).
+        white_pris_y = self.joint_pos[:, self.white_prismatic_dof_indices]  # (N, 4)
+        black_pris_y = self.joint_pos[:, self.black_prismatic_dof_indices]  # (N, 4)
+
+        # Figure Y positions: (N, 4, 5). Padded slots remain +inf, so min-over-figs
+        # naturally ignores them.
+        white_fig_y = white_pris_y.unsqueeze(-1) + self._figure_offsets_padded.unsqueeze(0)
+        black_fig_y = black_pris_y.unsqueeze(-1) + self._figure_offsets_padded.unsqueeze(0)
+
+        ball_y_exp = ball_y.view(-1, 1, 1)
+        white_min_dy = (white_fig_y - ball_y_exp).abs().min(dim=-1).values  # (N, 4)
+        black_min_dy = (black_fig_y - ball_y_exp).abs().min(dim=-1).values  # (N, 4)
+
+        ball_x_exp = ball_x.view(-1, 1)
+        white_dx = (ball_x_exp - self._white_rod_x.view(1, -1)).abs()       # (N, 4)
+        black_dx = (ball_x_exp - self._black_rod_x.view(1, -1)).abs()       # (N, 4)
+
+        white_contact = (white_dx < self._kick_rx) & (white_min_dy < self._kick_ry)  # (N, 4)
+        black_contact = (black_dx < self._kick_rx) & (black_min_dy < self._kick_ry)
+
+        # Rods are disjoint in X (min gap 0.149 >> 2 * 0.03), so at most one white
+        # rod contacts per env. argmax on int gives the first True; -1 if none.
+        any_white_contact = white_contact.any(dim=-1)
+        touching_rod_w = torch.where(
+            any_white_contact,
+            white_contact.int().argmax(dim=-1).to(torch.int8),
+            torch.full_like(self._last_white_touch_rod, -1),
+        )
+        any_black_contact = black_contact.any(dim=-1)
+        wall_touch = ball_y.abs() > self._kick_wall_y
+
+        dvx = ball_vx - self._prev_ball_vx
+        kick = (
+            any_white_contact
+            & (dvx < -self._kick_dvx_min)
+            & (ball_vx < -self._kick_vfwd_min)
+            & (self._last_white_touch_rod != touching_rod_w)
+        )
+
+        # Update last-toucher state. Reset beats set (wall/black touch clears, then
+        # white touch assigns; if both white and wall/black in same step, reset wins
+        # so the next touch is "fresh").
+        reset_mask = wall_touch | any_black_contact
+        new_last = torch.where(any_white_contact, touching_rod_w, self._last_white_touch_rod)
+        new_last = torch.where(
+            reset_mask, torch.full_like(self._last_white_touch_rod, -1), new_last
+        )
+        self._last_white_touch_rod = new_last
+        self._prev_ball_vx = ball_vx.clone()
+
+        return self.cfg.kick_reward * kick.to(torch.float32)
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
         # --- Ghost curriculum level progression ---
@@ -610,6 +739,12 @@ class FoosballEnv(DirectRLEnv):
         self.object_pos[env_ids] = object_default_state[:, :3] - self.scene.env_origins[env_ids]
         self.object_velocities[env_ids] = object_default_state[:, 7:]
 
+        # Reset kick-detection state. Seed _prev_ball_vx with the actual reset velocity
+        # so the first post-reset step sees dvx ≈ 0 (no spurious "kick" from the
+        # reset velocity jump).
+        self._prev_ball_vx[env_ids] = self.object_velocities[env_ids, 0]
+        self._last_white_touch_rod[env_ids] = -1
+
         ##set black in up position
         #black_pos_up = 2*torch.ones(joint_pos.shape[0],len(self.black_revolute_dof_indices), device=self.device)
         #black_vel_up = torch.zeros(joint_pos.shape[0],len(self.black_revolute_dof_indices), device=self.device)
@@ -640,11 +775,37 @@ class FoosballVisionEnv(FoosballEnv):
         self._frame_buf_initialized = torch.zeros(
             self.scene.num_envs, dtype=torch.bool, device=self.device,
         )
+        # Periodic allocator cleanup to work around suspected TiledCamera VRAM
+        # accumulation (see IsaacLab issue #2361). empty_cache every N steps
+        # reclaims unreferenced GPU buffers before the driver gets unhappy.
+        self._vision_step_count = 0
+        self._cache_empty_interval = 1000
 
     def _setup_scene(self):
         super()._setup_scene()
         self.tiled_camera = TiledCamera(self.cfg.tiled_camera)
         self.scene.sensors["tiled_camera"] = self.tiled_camera
+
+    def close(self):
+        """Tear down vision resources before the base env closes the scene.
+
+        Without this, SIGINT during training leaves replicator render products
+        and carb SHM segments alive past process exit, which segfaults the next
+        training launch.
+        """
+        try:
+            cam = getattr(self, "tiled_camera", None)
+            if cam is not None and hasattr(cam, "close"):
+                cam.close()
+            if hasattr(self, "_frame_buf"):
+                del self._frame_buf
+            import gc
+            torch.cuda.empty_cache()
+            gc.collect()
+        except Exception as e:  # noqa: BLE001
+            print(f"[WARN] FoosballVisionEnv.close() cleanup raised: {e}")
+        finally:
+            super().close()
 
     def _read_camera_uint8(self) -> torch.Tensor:
         """Fetch current RGB frame and normalize to (N, H, W, 3) uint8."""
@@ -684,6 +845,19 @@ class FoosballVisionEnv(FoosballEnv):
         )
         state = torch.clamp(state, -20.0, 20.0)
         state = torch.nan_to_num(state, nan=0.0, posinf=20.0, neginf=-20.0)
+
+        self._vision_step_count += 1
+        if self._vision_step_count % self._cache_empty_interval == 0:
+            torch.cuda.empty_cache()
+            if self.extras is not None:
+                # skrl's trainer only logs infos["log"][k] where v is a scalar torch.Tensor.
+                log_dict = self.extras.setdefault("log", {})
+                log_dict["cuda_mem_allocated_mb"] = torch.tensor(
+                    torch.cuda.memory_allocated() / 1e6, device=self.device
+                )
+                log_dict["cuda_mem_reserved_mb"] = torch.tensor(
+                    torch.cuda.memory_reserved() / 1e6, device=self.device
+                )
 
         return {"policy": torch.cat([rgb_flat, state], dim=-1)}
 

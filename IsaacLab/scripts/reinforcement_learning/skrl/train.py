@@ -22,6 +22,12 @@ parser = argparse.ArgumentParser(description="Train an RL agent with skrl.")
 parser.add_argument("--video", action="store_true", default=False, help="Record videos during training.")
 parser.add_argument("--video_length", type=int, default=200, help="Length of the recorded video (in steps).")
 parser.add_argument("--video_interval", type=int, default=2000, help="Interval between video recordings (in steps).")
+parser.add_argument(
+    "--record_overhead",
+    action="store_true",
+    default=False,
+    help="Also record the overhead TiledCamera view alongside the default video. Off by default since it doubles render work during video windows.",
+)
 parser.add_argument("--num_envs", type=int, default=None, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
@@ -147,10 +153,16 @@ class OverheadTiledVideoRecorder(gym.Wrapper):
             self._video_folder, f"overhead-step-{self._record_start:09d}-env{self._env_idx}.mp4"
         )
         try:
-            writer = imageio.get_writer(path, fps=self._fps, codec="libx264", macro_block_size=None)
-            for frame in self._frames:
-                writer.append_data(frame)
-            writer.close()
+            with imageio.get_writer(
+                path, fps=self._fps, codec="libx264", macro_block_size=None
+            ) as writer:
+                # Wrap the frame loop so KeyboardInterrupt still lets the
+                # context manager exit and reap the ffmpeg subprocess.
+                try:
+                    for frame in self._frames:
+                        writer.append_data(frame)
+                except (KeyboardInterrupt, Exception) as e:
+                    print(f"[WARN] Interrupted mid-write of {path}: {e}")
             print(
                 f"[INFO] Saved overhead video: {path} "
                 f"(env {self._env_idx}, {len(self._frames)} frames)"
@@ -313,12 +325,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO] Recording videos during training.")
         print_dict(video_kwargs, nesting=4)
         env = gym.wrappers.RecordVideo(env, **video_kwargs)
-        env = OverheadTiledVideoRecorder(
-            env,
-            video_folder=os.path.join(log_dir, "videos", "train_overhead"),
-            step_trigger=step_trigger,
-            video_length=args_cli.video_length,
-        )
+        if args_cli.record_overhead:
+            env = OverheadTiledVideoRecorder(
+                env,
+                video_folder=os.path.join(log_dir, "videos", "train_overhead"),
+                step_trigger=step_trigger,
+                video_length=args_cli.video_length,
+            )
 
     # wrap around environment for skrl
     env = SkrlVecEnvWrapper(env, ml_framework=args_cli.ml_framework)  # same as: `wrap_env(env, wrapper="auto")`
@@ -332,15 +345,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"[INFO] Loading model checkpoint from: {resume_path}")
         runner.agent.load(resume_path)
 
-    # run training
-    runner.run()
-
-    # close the simulator
-    env.close()
+    # run training — wrap in try/finally so SIGINT still runs env.close() and
+    # releases TiledCamera render products / carb SHM before the process exits.
+    try:
+        runner.run()
+    finally:
+        try:
+            env.close()
+        except Exception as e:
+            print(f"[WARN] env.close() raised: {e}")
 
 
 if __name__ == "__main__":
     # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
+    try:
+        main()
+    finally:
+        # close sim app last, after env cleanup has completed
+        simulation_app.close()
