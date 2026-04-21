@@ -30,7 +30,7 @@ models:
           - conv2d: {out_channels: 64, kernel_size: 4, stride: 2, padding: 0}
           - conv2d: {out_channels: 64, kernel_size: 3, stride: 1, padding: 0}
           - flatten
-        activations: relu
+        activations: elu  # was relu — ELU avoids dead-neuron collapse that can lock the policy to a constant output
       - name: net
         input: features_extractor
         layers: [512]
@@ -60,7 +60,7 @@ memory:
 # PPO agent (field names from PPO_DEFAULT_CONFIG)
 agent:
   class: PPO
-  rollouts: 32
+  rollouts: 64
   learning_epochs: 5
   mini_batches: 4
   discount_factor: 0.99
